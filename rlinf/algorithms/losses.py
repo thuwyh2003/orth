@@ -179,6 +179,11 @@ def compute_ppo_actor_loss(
     clip_log_ratio_min: Optional[float] = None,
     clip_log_ratio_max: Optional[float] = None,
     fast_path_zero_loss_mask: Optional[bool] = False,
+    denoise_inds=None,
+    denoise_num_steps=None,
+    kl_beta=None,
+    norm_scale=None,
+    use_gradient_reweight: Optional[bool]=False,
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -237,22 +242,59 @@ def compute_ppo_actor_loss(
     )
 
     loss_mask_count = loss_mask.count_nonzero() or 1
-    # For numerical stability.
-    log_ratio = logprobs - old_logprobs
+    # For numerical stability.  
+    log_ratio = logprobs - old_logprobs    # [12, 5, 7]
     if clip_log_ratio_min is not None:
         log_ratio = torch.clamp(log_ratio, min=clip_log_ratio_min)
     if clip_log_ratio_max is not None:
         log_ratio = torch.clamp(log_ratio, max=clip_log_ratio_max)
     ratio = torch.where(loss_mask, torch.exp(log_ratio), 0)
-    approx_kl = torch.where(loss_mask, log_ratio.detach(), 0.0)
-
+    # approx_kl = torch.where(loss_mask, log_ratio.detach(), 0.0)
+    #----wyh--
+    
+    with torch.no_grad():
+        approx_kl = 0.5 * ((ratio - 1) - log_ratio).pow(2)
+        mean_kl = loss_agg_func(approx_kl, loss_mask, loss_mask_ratio)
+    
+    #--------
+  
     clipped_ratio = torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
     policy_loss1 = -advantages * ratio
-    policy_loss2 = -advantages * clipped_ratio
-
+    policy_loss2 = -advantages * clipped_ratio    
+    
     clip_mask = policy_loss1.detach() < policy_loss2.detach()
-
     policy_loss = torch.max(policy_loss1, policy_loss2)
+    # -------wyh-------  tempflow grpo
+    if use_gradient_reweight:
+        denoise_num_step=denoise_num_steps[0,0].item()
+        def build_t(K, device):
+            return torch.linspace(1, 1/K, K, device=device)
+        def compute_weight(K, device, a=1.0):
+            t = build_t(K, device)                 # [K]
+            delta_t = 1.0 / K
+            sigma = a * torch.sqrt(t / (1 - torch.where(t==1,t[1],t)))    # [K]
+            w = sigma * torch.sqrt(torch.tensor(delta_t))        # [K]
+            return w
+        def normalize_weight(w, eps=1e-8):
+            return w / (w.mean() + eps)
+        w = compute_weight(denoise_num_step, policy_loss.device)   # [K]
+        w = normalize_weight(w)   # [K]
+        # print("norm_scale",norm_scale.shape)  [24,8,32]
+        # print("policy loss",policy_loss.shape)  [24,5,7]
+        # deniose_inds  [bzs,num_steps]
+        denoise_inds=denoise_inds[:,1]
+        scale=w[denoise_inds]
+        scale=scale.unsqueeze(1).unsqueeze(1)
+        
+        # norm_scale=norm_scale[:, :policy_loss.shape[1], :policy_loss.shape[2]]
+        # policy_loss=policy_loss*(norm_scale/norm_scale.mean())
+        policy_loss=policy_loss*scale
+    #---------------------------------
+    kl_loss =  kl_beta * mean_kl
+    actor_loss = policy_loss + kl_loss
+    
+    actor_loss = loss_agg_func(actor_loss, loss_mask, loss_mask_ratio)
+    kl_loss = loss_agg_func(kl_loss, loss_mask, loss_mask_ratio)
     if clip_ratio_c is not None:
         assert clip_ratio_c > 1.0, "clip_ratio_c must be greater than 1.0"
         policy_loss3 = torch.sign(advantages) * clip_ratio_c * advantages
@@ -294,6 +336,7 @@ def compute_ppo_actor_loss(
 
     metrics_data = {
         "actor/policy_loss": policy_loss.detach(),
+        "actor/kl_loss": kl_loss.detach(),  #wyh
         "actor/policy_loss_abs": metric_policy_loss_abs.detach(),
         "actor/ratio": masked_mean(ratio_for_metrics, loss_mask_for_metrics),
         "actor/ratio_abs": masked_mean(ratio_abs_for_metrics, loss_mask_for_metrics),
@@ -303,10 +346,10 @@ def compute_ppo_actor_loss(
         "actor/dual_cliped_ratio": masked_mean(
             dual_cliped_ratio_for_metrics, loss_mask_for_metrics
         ),
-        "actor/approx_kl": approx_kl.detach(),
+        "actor/approx_kl": mean_kl.detach(),  #wyh
         "actor/clip_fraction": clip_fraction.detach(),
     }
-    return policy_loss, metrics_data
+    return actor_loss, metrics_data
 
 
 def compute_ppo_critic_loss(

@@ -86,7 +86,29 @@ def policy_loss(**kwargs) -> tuple[torch.Tensor, dict]:
         kwargs = preprocess_loss_inputs(**kwargs)
 
     loss, metrics_data = loss_fn(**kwargs)
+    # print("loss_wo_kl",loss)
+    # ---------------wyh------------------
+    logprobs = kwargs.get("logprobs", None)
+    old_logprobs = kwargs.get("old_logprobs", None)
+    loss_mask = kwargs.get("loss_mask", None)
 
+    if logprobs is not None and old_logprobs is not None:
+        # KL(new || old)
+        log_ratio = logprobs - old_logprobs
+
+        ratio = torch.exp(log_ratio)
+        kl = ratio -1 -log_ratio
+        kl = kl.mean()
+
+        kl_coef = kwargs.get("kl_coef", 0.01)
+
+        # loss = loss + kl_coef * kl
+        # print("kl_loss",kl)
+        # logging
+        metrics_data["actor/kl"] = kl.detach().item()
+        metrics_data["actor/kl_coef"] = kl_coef
+        # breakpoint()
+    #--------------------------------
     if task_type == "embodied":
         metrics_data = postprocess_loss_metric(metrics_data)
     return loss, metrics_data

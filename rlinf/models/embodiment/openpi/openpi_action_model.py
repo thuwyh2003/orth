@@ -423,6 +423,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         log_probs = log_probs[
             :, :, : self.config.action_chunk, : self.config.action_env_dim
         ]
+        # print("log_probs",log_probs.shape)
         entropy = entropy[
             :, :, : self.config.action_chunk, : self.config.action_env_dim
         ]
@@ -541,6 +542,8 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         forward_inputs = {
             "chains": outputs["chains"],
             "denoise_inds": outputs["denoise_inds"],
+            "denoise_num_steps": outputs["denoise_num_steps"],
+            "norm_scale": outputs['norm_scale'],
             "tokenized_prompt": processed_obs["tokenized_prompt"],
             "tokenized_prompt_mask": processed_obs["tokenized_prompt_mask"],
             # "action" is the env-executed action, and "model_action" is the original output by the model.
@@ -580,7 +583,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         device = observation.state.device
         num_steps = self.config.num_steps
         if noise is None:
-            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)   # (6, 8, 32)
             noise = self.sample_noise(actions_shape, device)
         else:
             # DSRL: SAC provides noise, convert dtype to match action_in_proj
@@ -624,6 +627,55 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             )
             log_probs.append(initial_log_prob)
 
+        def project_orthogonal_batch(g,v,eps=1e-8):
+            """
+            this function is used to project vector g to the orthogonal direction of vector v
+            """
+            print("----------use_orth_project-----------")
+            v = v.detach()
+            dot = (g*v).sum(dim=-1,keepdim=True)
+            norm=(v*v).sum(dim=-1,keepdim=True).clamp(min=eps)
+            proj=g-(dot/norm)*v
+            return proj
+        
+        
+        def get_gamma(step_idx, total_steps, gamma_schedule):
+            # step_idx: 0 ~ T-1
+            return gamma_schedule[step_idx]
+        
+        def compute_alpha_beta(gamma, dim):
+            # (d-1)β² + α² = d
+            beta = (dim / ((dim - 1) + gamma**2))**0.5
+            alpha = gamma * beta
+            return alpha, beta
+        
+        def sample_velocity_aligned_noise(
+            v_t, sigma_t, step_idx, total_steps,
+            gamma_schedule,
+            detach_u=True
+        ):
+            B, N ,D = v_t.shape
+
+            # 1. 当前 γ
+            gamma = get_gamma(step_idx, total_steps, gamma_schedule)
+
+            # 2. 单位方向
+            norm = torch.norm(v_t, dim=-1, keepdim=True).clamp(min=1e-8)
+            u = v_t / norm
+            if detach_u:
+                u = u.detach()
+
+            # 3. α, β
+            alpha, beta = compute_alpha_beta(gamma, D)
+
+            # 4. 噪声
+            eps = torch.randn_like(v_t)
+
+            eps_parallel = (eps * u).sum(dim=-1, keepdim=True) * u
+            eps_perp = eps - eps_parallel
+
+            z = sigma_t * (alpha * eps_parallel + beta * eps_perp)
+            return z, gamma
         # In the joint logprob mode, we need to sample the logprob for each denoise step
         # In the non-joint logprob mode, only one denoise step is sampled and ode-sde mix sampling is used
         # denoise index
@@ -642,15 +694,15 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         else:
             denoise_inds = torch.tensor([-1] * num_steps)
         denoise_inds = denoise_inds[None].repeat(bsize, 1)
-
-        # denoise step
+        norm_scales=[]
+        # denoise step     # 4 
         for idx in range(num_steps):
             # sample mean var val
             if idx == denoise_inds[0][idx]:
                 sample_mode = "train"
             else:
                 sample_mode = "eval"
-            x_t_mean, x_t_std, value_t = self.sample_mean_var_val(
+            x_t_mean, x_t_std, value_t, norm_scale, v_t = self.sample_mean_var_val(
                 x_t,
                 idx,
                 state,
@@ -659,40 +711,85 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 sample_mode,
                 num_steps,
                 compute_values,
-            )
+            )     # norm_scale is scale parameter in tempflow-GRPO
             # Euler step - use new tensor assignment instead of in-place operation
-            x_t = x_t_mean + self.sample_noise(x_t.shape, device) * x_t_std
-            log_prob = self.get_logprob_norm(x_t, x_t_mean, x_t_std)
+            # print("x_t_mean",x_t_mean)
+            # print("x_t_std",x_t_std)
+            # print("v_t",v_t)
+            
+            gamma_schedule=self.config.gamma_schedule
+            noise=self.sample_noise(x_t.shape, device)
+            if sample_mode=="train" and self.config.use_orth_noise:
+                gamma_schedule = self.config.gamma_schedule
+                # noise_proj= project_orthogonal_batch(noise,v_t)
+                # x_t = x_t_mean + noise_proj * x_t_std 
+                
+                z_noise, gamma = sample_velocity_aligned_noise(
+                    v_t, sigma_t=1.0,
+                    step_idx=idx,
+                    total_steps=num_steps,
+                    gamma_schedule=gamma_schedule
+                )
+                x_t = x_t_mean + z_noise * x_t_std 
+                #---------test----------
+                # residual = x_t - x_t_mean
+                # v_norm = torch.norm(v_t, dim=-1, keepdim=True).clamp(min=1e-8)
+                # v_unit = v_t / v_norm
+                # parallel = (residual * v_unit).sum(dim=-1)          # 在v方向的分量
+                # perp_norm = torch.norm(residual - parallel.unsqueeze(-1)*v_unit, dim=-1)
+                # total_norm = torch.norm(residual, dim=-1)
+                # print(f"\n=== Orthogonal Noise Debug (Step {idx}) ===")
+                # print(f"Parallel component (should be near 0): {parallel.mean().item():.6f} ± {parallel.std().item():.6f}")
+                # print(f"Perp / Total norm ratio:     { (perp_norm.mean()/total_norm.mean()).item():.4f}")
+                # print(f"Mean noise std:               {x_t_std.mean().item():.4f}")
+                #------------------------
+            else:
+                x_t = x_t_mean + noise * x_t_std     # [6, 8, 32]
+            log_prob = self.get_logprob_norm(x_t, x_t_mean, x_t_std, 
+                                             v_t = v_t, 
+                                             use_orth_noise = self.config.use_orth_noise,
+                                             step_idx=idx,
+                                             gamma_schedule=gamma_schedule,
+                                             mode=sample_mode)
             # store
+            
+            if log_prob is None:
+                print(f"Bug:log_prob is None in {idx}")
             values.append(value_t)
             chains.append(x_t)
             log_probs.append(log_prob)
+            norm_scales.append(norm_scale)
         x_0 = x_t
-        chains = torch.stack(chains, dim=1)
+        chains = torch.stack(chains, dim=1)   # [6,5,8,32]
         # post process for logprob
         log_probs = torch.stack(log_probs, dim=1)[
             :, :, : self.config.action_chunk, : self.config.action_env_dim
-        ]
+        ]     # [6, 4, 5, 7]
         if self.config.joint_logprob:
             log_probs = log_probs.mean(dim=1)
         else:
             log_probs = log_probs[
                 torch.arange(log_probs.shape[0]),
                 denoise_inds[:, 0],
-            ]
+            ]      #  [6,4,5,7] -> [6,5,7]  取出SDE步的log_probs
         # post process for value
         if self.use_vlm_value:
             values = values_vlm[:, None]
         else:
             values = torch.stack(values, dim=1).mean(dim=-1, keepdim=True)
+        num_steps=torch.tensor([num_steps]*num_steps).repeat(bsize,1)
         return {
             "actions": x_0,
             "chains": chains,
             "prev_logprobs": log_probs,
             "prev_values": values,
             "denoise_inds": denoise_inds,
+            "denoise_num_steps": num_steps,
+            "norm_scale": norm_scales[denoise_inds[0,0].item()]
         }
 
+    
+    
     def sample_mean_var_val(
         self,
         x_t,
@@ -740,7 +837,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             x_t,
             t_input,
         )
-        v_t = self.action_out_proj(suffix_out)  # [bs,n_action_steps,max_action_dim]
+        v_t = self.action_out_proj(suffix_out)  # [bs,n_action_steps,max_action_dim]  [6,8,32]
         # value prediction
         if (
             self.config.add_value_head
@@ -765,6 +862,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         t_input = t_input[:, None, None].expand_as(x_t)
         x0_pred = x_t - v_t * t_input
         x1_pred = x_t + v_t * (1 - t_input)
+        sigma_i=0
         if mode == "eval":
             x0_weight = 1 - (t_input - delta)
             x1_weight = t_input - delta
@@ -796,7 +894,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             else:
                 raise ValueError(f"Invalid noise method: {self.config.noise_method}")
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
-        return x_t_mean, x_t_std, value_t
+        return x_t_mean, x_t_std, value_t, sigma_i*torch.sqrt(delta), v_t
 
     def get_suffix_out(
         self,
@@ -847,19 +945,81 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         return suffix_out
 
     # TODO: to check potential nan here
-    def get_logprob_norm(self, sample, mu, sigma):
+    def get_logprob_norm(self, sample, mu, sigma, v_t=None, use_orth_noise=False,
+                        step_idx=None,
+                        gamma_schedule = None,
+                        mode = "eval"):
         # logprob = log p(x|mu,sigma) = -log(sigma) - 0.5 * log(2 * pi) - 0.5 * ((x - mu) / sigma) ** 2
-        if self.config.safe_get_logprob:
-            log_prob = -torch.pow((sample - mu), 2)
+        
+        # if not use_orth_noise or v_t is None or mode=="eval":
+        if not use_orth_noise or v_t is None:
+        
+            if self.config.safe_get_logprob:
+                log_prob = -torch.pow((sample - mu), 2)
+            else:
+                mask = sigma == 0
+                sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
+                constant_term = -torch.log(sigma_safe) - 0.5 * torch.log(
+                    2 * torch.pi * torch.ones_like(sample)
+                )
+                exponent_term = -0.5 * torch.pow((sample - mu) / sigma_safe, 2)
+                log_prob = constant_term + exponent_term
+                log_prob = torch.where(mask, torch.zeros_like(log_prob), log_prob)
         else:
-            mask = sigma == 0
-            sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
-            constant_term = -torch.log(sigma_safe) - 0.5 * torch.log(
-                2 * torch.pi * torch.ones_like(sample)
+            assert step_idx is not None and gamma_schedule is not None
+            residual = sample - mu   # [B,T,D]
+            
+            v_norm = torch.norm(v_t, dim=-1, keepdim=True).clamp(min=1e-6)
+            v_unit = (v_t / v_norm).detach()
+
+            gamma = gamma_schedule[step_idx]
+            d = residual.shape[-1]
+
+            beta = (d / ((d - 1) + gamma**2))**0.5
+            alpha = gamma * beta
+            
+            beta = torch.tensor(beta, device=sample.device, dtype=sample.dtype)
+            alpha = torch.tensor(alpha, device=sample.device, dtype=sample.dtype)
+
+            sigma_safe = torch.where(sigma == 0, torch.ones_like(sigma), sigma)
+
+            diff = residual / sigma_safe   # [B,T,D]
+
+            # -------- 核心：构造 Σ^{-1} diff --------
+
+            # parallel component
+            proj = (diff * v_unit).sum(dim=-1, keepdim=True)   # [B,T,1]
+            parallel = proj * v_unit                          # [B,T,D]
+
+            # perp component
+            perp = diff - parallel                            # [B,T,D]
+
+            # 应用各向异性缩放（关键）
+            scaled = perp / (beta**2) + parallel / (alpha**2)   # [B,T,D]
+
+            # -------- 每维 logprob --------
+            if self.config.safe_get_logprob:
+                log_prob = - diff * scaled   # [B,T,D]
+                return log_prob
+
+            # exponent（逐维）
+            exponent_term = -0.5 * diff * scaled   # [B,T,D]
+
+            # constant term（逐维）
+            constant_term = (
+                - torch.log(sigma_safe)
+                - 0.5 * torch.log(2 * torch.pi * torch.ones_like(sample))
             )
-            exponent_term = -0.5 * torch.pow((sample - mu) / sigma_safe, 2)
-            log_prob = constant_term + exponent_term
-            log_prob = torch.where(mask, torch.zeros_like(log_prob), log_prob)
+
+            # 再加各向异性修正（只在方向上不同）
+            # trick：把 logdet 平均分配到每个维度
+            logdet = (d - 1) * torch.log(beta**2) + torch.log(alpha**2)
+            logdet_per_dim = logdet / d
+
+            constant_term = constant_term - 0.5 * logdet_per_dim
+
+            log_prob = constant_term + exponent_term   # [B,T,D]
+
         return log_prob
 
     def preprocess_for_train(self, data):
@@ -906,17 +1066,21 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 chains[:, 0],
                 torch.zeros_like(chains[:, 0]),
                 torch.ones_like(chains[:, 0]),
+                v_t=None,
+                use_orth_noise=False,
             )
             initial_entropy = self.gaussian_entropy(torch.ones_like(chains[:, 0]))
             chains_log_probs.append(initial_log_prob)
             chains_entropy.append(initial_entropy)
         else:
             num_steps = 1
+        # print("num steps",num_steps)
+        # print("chains",chains)
         for idx in range(num_steps):
             denoise_ind = denoise_inds[:, idx]
             chains_pre = chains[torch.arange(bsize), denoise_ind]
             chains_next = chains[torch.arange(bsize), denoise_ind + 1]
-            x_t_mean, x_t_std, value_t = self.sample_mean_var_val(
+            x_t_mean, x_t_std, value_t, norm_scale, v_t = self.sample_mean_var_val(
                 chains_pre,
                 denoise_ind,
                 state,
@@ -926,7 +1090,13 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 self.config.num_steps,
                 compute_values,
             )
-            log_probs = self.get_logprob_norm(chains_next, x_t_mean, x_t_std)
+            log_probs = self.get_logprob_norm(chains_next, x_t_mean, x_t_std,
+                                              v_t = v_t,
+                                              use_orth_noise = self.config.use_orth_noise,
+                                              step_idx=int(denoise_inds[0,0].item()),
+                                              gamma_schedule= self.config.gamma_schedule)
+            # print("micro log probs",log_probs.shape)
+            # ====================================================
             entropy = self.gaussian_entropy(x_t_std)
             chains_log_probs.append(log_probs)
             chains_entropy.append(entropy)

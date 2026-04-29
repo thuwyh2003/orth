@@ -18,6 +18,7 @@ from functools import partial
 from typing import Optional
 
 import numpy as np
+from rlinf.workers import rollout
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -370,6 +371,7 @@ class FSDPActor(FSDPModelManager, Worker):
     ) -> tuple[dict[str, torch.Tensor], RolloutResult]:
         result: RolloutResult = channel.get()
 
+        print("result",result.keys())
         batch = result.to_actor_batch(
             self.cfg.data.max_prompt_length,
             self.cfg.actor.model.encoder_seq_length,
@@ -795,7 +797,11 @@ class FSDPActor(FSDPModelManager, Worker):
                     loss = loss - self.cfg.algorithm.entropy_bonus * entropy_loss
 
             kl_loss = torch.tensor(0.0, device=Worker.torch_platform.current_device())
+            # breakpoint()
+            print("kl_beta",self.kl_beta)
+            print("ref_logprobs",ref_logprobs)
             if self.kl_beta > 0 and ref_logprobs is not None:
+                
                 kld = kl_penalty(ref_logprobs, logprobs, self.kl_penalty_type)
                 kl_loss = self.loss_agg_func(kld, loss_mask)
                 loss = loss + kl_loss * self.kl_beta
@@ -1104,7 +1110,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             recv_list.append(trajectory)
 
         self.rollout_batch = convert_trajectories_to_batch(recv_list)
-
         self.rollout_batch = self._process_received_rollout_batch(self.rollout_batch)
 
     def _process_received_rollout_batch(
@@ -1315,14 +1320,22 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch["prev_logprobs"].shape[0]
             * self.rollout_batch["prev_logprobs"].shape[1]
         )
+        # print("rollout size",rollout_size)
+        # print("rollout batch prev_logprobs",self.rollout_batch['prev_logprobs'].shape)
         g = torch.Generator()
         g.manual_seed(self.cfg.actor.seed + self._rank)
         shuffle_id = torch.randperm(rollout_size, generator=g)
 
         with torch.no_grad():
+            
+            # print("self.rollout_batch.keys()",self.rollout_batch.keys())
+            # if self.rollout_batch.get("forward_inputs",None) is not None:
+            #     print("forward_inputs",self.rollout_batch['forward_inputs'].keys())
+            # print("before shuffle",self.rollout_batch['forward_inputs']['denoise_inds'].shape, self.rollout_batch['forward_inputs']['denoise_inds'][:,0])
             self.rollout_batch = process_nested_dict_for_train(
                 self.rollout_batch, shuffle_id
             )
+            # print("after shuffle",self.rollout_batch['forward_inputs']['denoise_inds'].shape,self.rollout_batch['forward_inputs']['denoise_inds'][:,0])
 
         assert (
             self.cfg.actor.global_batch_size
@@ -1343,6 +1356,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         assert rollout_size % batch_size_per_rank == 0, (
             f"{rollout_size} is not divisible by {batch_size_per_rank}"
         )
+
         metrics = {}
         update_epoch = self.cfg.algorithm.get("update_epoch", 1)
         for _ in range(update_epoch):
@@ -1353,6 +1367,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             for train_global_batch in rollout_dataloader_iter:
                 # split batch into micro_batches
                 train_global_batch_size = train_global_batch["prev_logprobs"].shape[0]
+                # print(train_global_batch.keys())
                 assert (
                     train_global_batch_size
                     == self.cfg.actor.global_batch_size
@@ -1377,6 +1392,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         self.model,
                         is_last_micro_batch=(idx + 1) == self.gradient_accumulation,
                     )
+                    
                     advantages = batch["advantages"]
                     prev_logprobs = batch["prev_logprobs"]
                     returns = batch.get("returns", None)
@@ -1385,7 +1401,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     loss_mask_sum = batch.get("loss_mask_sum", None)
 
                     forward_inputs = batch.get("forward_inputs", None)
-
+                    # print("forward_inputs",forward_inputs.keys())
+                    # print(self.model)
                     kwargs = {}
                     if SupportedModel(self.cfg.actor.model.model_type) in [
                         SupportedModel.OPENVLA,
@@ -1426,8 +1443,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "logprob_type": self.cfg.algorithm.logprob_type,
                         "reward_type": self.cfg.algorithm.reward_type,
                         "single_action_dim": self.cfg.actor.model.get("action_dim", 7),
+                        "kl_beta":self.cfg.algorithm.kl_beta,
                         "logprobs": output_dict["logprobs"],
                         "values": output_dict.get("values", None),
+                        "denoise_inds": forward_inputs.get("denoise_inds",None),
+                        "denoise_num_steps":forward_inputs.get("denoise_num_steps",None),
+                        "norm_scale": forward_inputs.get("norm_scale",None),
                         "old_logprobs": prev_logprobs,
                         "advantages": advantages,
                         "returns": returns,
@@ -1442,6 +1463,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "task_type": self.cfg.runner.task_type,
                         "critic_warmup": self.optimizer_steps
                         < self.critic_warmup_steps,
+                        "use_gradient_reweight": self.cfg.actor.model.openpi.get("use_gradient_reweight",False)
                     }
                     loss, metrics_data = policy_loss(**kwargs)
 

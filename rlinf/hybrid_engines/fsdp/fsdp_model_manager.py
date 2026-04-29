@@ -303,6 +303,10 @@ class FSDPModelManager:
         Args:
             load_path: the directory to load checkpoint.
         """
+        if self.is_weight_offloaded:
+            self.load_param_and_grad(self.device)
+        if self.is_optimizer_offloaded:
+            self.load_optimizer(self.device)
         self._strategy.load_checkpoint(
             self.model, self.optimizer, self.lr_scheduler, load_path
         )

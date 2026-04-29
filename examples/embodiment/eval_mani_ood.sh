@@ -7,11 +7,11 @@ export SRC_FILE="${EMBODIED_PATH}/eval_embodied_agent.py"
 
 export HYDRA_FULL_ERROR=1
 
-EVAL_NAME=YOUR_EVAL_NAME
-CKPT_PATH=YOUR_CKPT_PATH           # Optional: .pt file or None, if None, will use the checkpoint in rollout.model.model_path
-CONFIG_NAME=YOUR_CFG_NAME          # env.eval must be maniskill_ood_template
-TOTAL_NUM_ENVS=YOUR_TOTAL_NUM_ENVS # total number of evaluation environments
-EVAL_ROLLOUT_EPOCH=YOUR_EVAL_ROLLOUT_EPOCH # eval rollout epoch, total_trajectory_num = eval_rollout_epoch * total_num_envs
+EVAL_NAME=maniskill_ppo_openpi_pi05_orth_3
+CKPT_PATH=/home/wyh/RLinf/logs/20260428-15:29:52-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_200/actor/model_state_dict/full_weights.pt    # Optional: .pt file or None, if None, will use the checkpoint in rollout.model.model_path
+CONFIG_NAME=maniskill_ppo_openpi_pi05_orth_eval        # env.eval must be maniskill_ood_template
+TOTAL_NUM_ENVS=24 # total number of evaluation environments
+EVAL_ROLLOUT_EPOCH=8 # eval rollout epoch, total_trajectory_num = eval_rollout_epoch * total_num_envs
 
 for env_id in \
     "PutOnPlateInScene25VisionImage-v1" "PutOnPlateInScene25VisionTexture03-v1" "PutOnPlateInScene25VisionTexture05-v1" \
