@@ -218,7 +218,6 @@ class FlowTActor(nn.Module):
             torch.log(self.action_scale * (1 - y_t**2) + 1e-6), dim=-1, keepdim=True
         )
         total_log_prob -= tanh_correction
-
         return action, total_log_prob.detach()
 
 

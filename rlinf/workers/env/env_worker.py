@@ -173,6 +173,10 @@ class EnvWorker(Worker):
         env_list = []
 
         for stage_id in range(self.stage_num):
+            # print("stage_id",stage_id)
+            # print("num_envs_per_stage",num_envs_per_stage)
+            # print("env_cfg",env_cfg)
+            # print("env_cls",env_cls)
             env = env_cls(
                 cfg=env_cfg,
                 num_envs=num_envs_per_stage,
@@ -207,6 +211,7 @@ class EnvWorker(Worker):
                         env_cfg.data_collection, "finalize_interval", 100
                     ),
                 )
+                # print("env",env)
             env_list.append(env)
         return env_list
 

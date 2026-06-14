@@ -1103,7 +1103,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         send_num = self._component_placement.get_world_size("env") * self.stage_num
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(send_num, recv_num)
-
         recv_list = []
         for _ in range(split_num):
             trajectory: Trajectory = await input_channel.get(async_op=True).async_wait()
@@ -1431,13 +1430,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             use_cache=False,
                             **kwargs,
                         )
+                    # print("ouput dict:",output_dict.keys())
 
                     if (
                         SupportedModel(self.cfg.actor.model.model_type)
                         == SupportedModel.GR00T
                     ):
                         prev_logprobs = output_dict["prev_logprobs"]
-
+                    
                     kwargs = {
                         "loss_type": self.cfg.algorithm.loss_type,
                         "logprob_type": self.cfg.algorithm.logprob_type,
@@ -1449,12 +1449,18 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "denoise_inds": forward_inputs.get("denoise_inds",None),
                         "denoise_num_steps":forward_inputs.get("denoise_num_steps",None),
                         "norm_scale": forward_inputs.get("norm_scale",None),
+                        "gamma":forward_inputs.get("gamma",None),
+                        "prev_x_t_std":forward_inputs.get("prev_x_t_std",None),
+                        "load_noise":forward_inputs.get("load_noise",None),
+                        "load_v_t":forward_inputs.get("load_v_t",None),
+                        "new_v_t":output_dict.get("v_t",None),
                         "old_logprobs": prev_logprobs,
                         "advantages": advantages,
                         "returns": returns,
                         "prev_values": prev_values,
                         "clip_ratio_high": self.cfg.algorithm.clip_ratio_high,
                         "clip_ratio_low": self.cfg.algorithm.clip_ratio_low,
+                        "noise_level": self.cfg.actor.model.openpi.get("noise_level",None),
                         "value_clip": self.cfg.algorithm.get("value_clip", None),
                         "huber_delta": self.cfg.algorithm.get("huber_delta", None),
                         "loss_mask": loss_mask,

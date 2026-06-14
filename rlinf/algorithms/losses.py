@@ -19,7 +19,7 @@ import torch
 from rlinf.algorithms.registry import register_policy_loss
 from rlinf.algorithms.utils import huber_loss
 from rlinf.utils.utils import masked_mean, masked_mean_ratio
-
+import numpy as np
 
 def compute_decoupled_ppo_actor_loss(
     logprobs: torch.Tensor,
@@ -164,6 +164,481 @@ def compute_decoupled_ppo_actor_loss(
     return pg_loss, metrics_data
 
 
+def compute_loglik_surrogate_actor_loss(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    load_noise: torch.Tensor,   # [B, K, D]
+    load_v_t: torch.Tensor,     # [B, K, D]
+    new_v_t: torch.Tensor,  # [B,K,D]
+    advantages: torch.Tensor,   # [B]
+    prev_x_t_std: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    loss_agg_func: Optional[Callable[..., torch.Tensor]] = None,
+    loss_mask_sum: Optional[torch.Tensor] = None,
+    loss_mask_ratio: Optional[torch.Tensor] = None,
+    norm_scale: Optional[torch.Tensor] = None,
+    use_gradient_reweight: Optional[bool] = False,
+    denoise_inds=None,
+    denoise_num_steps=None,
+    noise_level:float =None,
+    detach_v_norm:bool =True,
+    gamma=None,
+    eps=1e-8,
+    delta=1e-6,
+    beta_norm:float =0.1,
+    lambda_perp:float =1.0,
+    use_grad_clip: bool = True,
+    max_grad_proj: float = 5.0,
+    clip_ratio_low:float = 0.8,
+    clip_ratio_high:float = 1.2,
+    signal_scale:float =5,
+    lambda_align = 0.0004,
+    lambda_kl = 0.05,
+
+    **kwargs,
+):
+    """
+    Flow surrogate loss:
+        L = - E[ C_t * epsilon^T v_theta * A ]
+    """
+
+    assert load_noise.dtype == torch.float32
+    assert load_v_t.dtype == torch.float32
+    assert advantages.dtype == torch.float32
+    assert new_v_t.dtype == torch.float32
+    B, K, D = load_noise.shape
+    # print("load_noise_in_loss",load_noise.shape)  
+    # print("log_probs_in_loss",logprobs.shape)   #[24]
+    # print("denoise inds",denoise_inds.shape)   #[24,4]
+    # print("load_noise:",load_noise.shape)
+    # print("load_v_t",load_v_t.shape)
+    if loss_mask is None:
+        loss_mask = torch.ones((B, K), device=load_noise.device, dtype=torch.bool)
+        
+    if loss_agg_func is None:
+        def loss_agg_func(x, mask):
+            x = torch.where(mask, x, torch.zeros_like(x))
+            return x.sum() / (mask.sum() + 1e-8)
+    # expand advantage: [B] -> [B, 1]
+    adv = advantages[:, None]
+    t_values = torch.tensor([0.75, 0.75, 0.5, 0.25], 
+                          device=denoise_inds.device, dtype=torch.float32)
+    
+    t_norm = t_values[denoise_inds]
+    t_norm = t_norm[:,:1].repeat(1,8)
+    t_norm = t_norm.unsqueeze(-1)   #[24,8,1]
+
+    if noise_level is not None:
+        alpha_term = 1 + noise_level**2/2
+    else:
+        alpha_term = 1
+    
+    delta_v = new_v_t - load_v_t.detach()
+    delta_t = 1/4
+    
+    scaling_term_1 = (alpha_term**2)*(1.0 - t_norm) * delta_t / (2*t_norm*(noise_level**2))
+    scaling_term_2 = alpha_term*torch.sqrt(delta_t*(1-t_norm))/(noise_level*torch.sqrt(t_norm))
+    
+    align_target = load_noise / scaling_term_2
+    align_loss = lambda_align * torch.sum((delta_v + align_target)**2, dim=-1)
+    align_loss = align_loss * torch.clamp(adv,min=0)    
+    
+    # print("scaling_term_1",scaling_term_1.shape)
+    # print("scaling_term_2",scaling_term_2.shape)
+    time_weight = torch.sqrt(t_norm/(1-t_norm))
+    
+    logr1 = -scaling_term_1*(delta_v**2).sum(dim=-1, keepdim=True)
+    logr2 = -scaling_term_2*(load_noise*delta_v).sum(dim=-1, keepdim=True)
+    logr = logr1 + logr2
+    logr = torch.clamp(logr, -5, 2)
+    ratio = torch.exp(logr)
+    ratio = ratio.squeeze(-1)   
+    # print("ratio",ratio.shape)    # [24, 8]
+    
+    ratio_clipped = torch.clamp(ratio, 1-clip_ratio_low, 1+clip_ratio_high)
+
+    surr1 = -ratio * adv
+    surr2 = -ratio_clipped * adv
+
+
+    clip_mask = surr1.detach() < surr2.detach()
+    clip_fraction = (clip_mask * loss_mask).sum() / float(loss_mask.count_nonzero())
+
+    policy_loss = torch.max(surr1, surr2)
+    
+    # tempflow 
+    weight = torch.sqrt(t_norm.squeeze(-1))/torch.sqrt(1-t_norm.squeeze(-1))
+    # policy_loss *= weight    
+    
+    kl_loss = 5 * (lambda_kl / 2.0) * (scaling_term_2.squeeze(-1) * torch.norm(delta_v, dim=-1))**2
+    total_loss = 10*policy_loss + align_loss + kl_loss
+    total_loss = loss_agg_func(total_loss, loss_mask)
+
+    # ---------------------------
+    # metrics
+    # ---------------------------
+    with torch.no_grad():
+        policy_loss_mean = torch.where(
+            loss_mask,
+            policy_loss,
+            torch.zeros_like(policy_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        align_loss_mean = torch.where(
+            loss_mask,
+            align_loss,
+            torch.zeros_like(align_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        kl_loss_mean = torch.where(
+            loss_mask,
+            kl_loss,
+            torch.zeros_like(kl_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        
+    metrics_data = {
+        "actor/total_loss": total_loss.detach(),
+        "actor/policy_loss": policy_loss_mean.detach(),
+        # "actor/L2_scale":scaling_term_1.mean().detach(),
+        # "actor/proj_scale":scaling_term_2.mean().detach(),
+        # "actor/L2_loss":torch.exp(logr1).mean().detach(),
+        # "actor/proj_loss":torch.exp(logr2).mean().detach(),
+        "actor/adv_mean": advantages.mean().detach(),
+        "actor/align_loss":align_loss_mean.detach(),
+        "actor/kl_loss":kl_loss_mean.detach(),
+        "actor/ratio_max": torch.max(ratio).detach(),
+        "actor/ratio_min": torch.min(ratio).detach(),
+        "actor/ratio_std": ratio.std().detach(),
+        "actor/clip_fraction":clip_fraction.detach(),
+        "actor/delta_v_norm": (delta_v**2).sum(dim=-1).mean().detach(),
+    }
+
+    return total_loss, metrics_data
+
+
+
+
+def compute_orth_loglik_surrogate_actor_loss(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    load_noise: torch.Tensor,   # [B, K, D]
+    load_v_t: torch.Tensor,     # [B, K, D]
+    new_v_t: torch.Tensor,  # [B,K,D]
+    advantages: torch.Tensor,   # [B]
+    prev_x_t_std: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    loss_agg_func: Optional[Callable[..., torch.Tensor]] = None,
+    loss_mask_sum: Optional[torch.Tensor] = None,
+    loss_mask_ratio: Optional[torch.Tensor] = None,
+    norm_scale: Optional[torch.Tensor] = None,
+    use_gradient_reweight: Optional[bool] = False,
+    denoise_inds=None,
+    denoise_num_steps=None,
+    noise_level:float =None,
+    detach_v_norm:bool =True,
+    gamma=None,
+    eps=1e-8,
+    delta=1e-6,
+    beta_norm:float =0.1,
+    lambda_perp:float =1.0,
+    use_grad_clip: bool = True,
+    max_grad_proj: float = 5.0,
+    clip_ratio_low:float = 0.8,
+    clip_ratio_high:float = 1.2,
+    signal_scale:float =5,
+    lambda_align = 0.0004,
+    lambda_kl = 0.05,
+
+    **kwargs,
+):
+    """
+    Flow surrogate loss:
+        L = - E[ C_t * epsilon^T v_theta * A ]
+    """
+
+    assert load_noise.dtype == torch.float32
+    assert load_v_t.dtype == torch.float32
+    assert advantages.dtype == torch.float32
+    assert new_v_t.dtype == torch.float32
+    B, K, D = load_noise.shape
+    # print("load_noise_in_loss",load_noise.shape)  
+    # print("log_probs_in_loss",logprobs.shape)   #[24]
+    # print("denoise inds",denoise_inds.shape)   #[24,4]
+    # print("load_noise:",load_noise.shape)
+    # print("load_v_t",load_v_t.shape)
+    if loss_mask is None:
+        loss_mask = torch.ones((B, K), device=load_noise.device, dtype=torch.bool)
+        
+    if loss_agg_func is None:
+        def loss_agg_func(x, mask):
+            x = torch.where(mask, x, torch.zeros_like(x))
+            return x.sum() / (mask.sum() + 1e-8)
+    # expand advantage: [B] -> [B, 1]
+    adv = advantages[:, None]
+    t_values = torch.tensor([0.75, 0.75, 0.5, 0.25], 
+                          device=denoise_inds.device, dtype=torch.float32)
+    
+    t_norm = t_values[denoise_inds]
+    t_norm = t_norm[:,:1].repeat(1,8)
+    t_norm = t_norm.unsqueeze(-1)   #[24,8,1]
+
+    if noise_level is not None:
+        alpha_term = 1 + noise_level**2/2
+    else:
+        alpha_term = 1
+    
+    delta_v = new_v_t - load_v_t.detach()
+    delta_t = 1/4
+    
+    u = load_v_t / (load_v_t.norm(dim=-1, keepdim=True) + 1e-8)
+    I = torch.eye(load_v_t.shape[-1], device=load_v_t.device)
+    I = I.expand(u.shape[0],u.shape[1],u.shape[-1],u.shape[-1])
+    P_parallel = torch.einsum('...i,...j->...ij', u, u)
+    Sigma = 0.05 * P_parallel + 1.0 * (I - P_parallel)   # 单位比例 Sigma
+    Sigma_inv = torch.linalg.inv(Sigma + 1e-6 * I)
+    
+    term1 = torch.einsum('...i,...ij,...j->...', delta_v, Sigma_inv, delta_v)
+    term2 = torch.einsum('...i,...ij,...j->...', delta_v, Sigma_inv, load_noise)
+    
+    scaling_term_1 = (alpha_term**2)*(1.0 - t_norm) * delta_t / (2*t_norm*(noise_level**2))
+    scaling_term_2 = alpha_term*torch.sqrt(delta_t*(1-t_norm))/(noise_level*torch.sqrt(t_norm))
+    
+    align_target = load_noise / scaling_term_2
+    align_loss = lambda_align * torch.sum((delta_v + align_target)**2, dim=-1)
+    align_loss = align_loss * torch.clamp(adv,min=0)    
+    
+    # print("scaling_term_1",scaling_term_1.shape)
+    # print("scaling_term_2",scaling_term_2.shape)
+    time_weight = torch.sqrt(t_norm/(1-t_norm))
+    
+    logr1 = -scaling_term_1 * term1 
+    logr2 = -scaling_term_2 * term2 
+    logr = logr1 + logr2
+    ratio = torch.exp(logr)
+    ratio = ratio.squeeze(-1)   
+    # print("ratio",ratio.shape)    # [24, 8]
+    
+    ratio_clipped = torch.clamp(ratio, 1-clip_ratio_low, 1+clip_ratio_high)
+
+    surr1 = -ratio * adv
+    surr2 = -ratio_clipped * adv
+
+
+    clip_mask = surr1.detach() < surr2.detach()
+    clip_fraction = (clip_mask * loss_mask).sum() / float(loss_mask.count_nonzero())
+
+    policy_loss = torch.max(surr1, surr2)
+    
+    # tempflow 
+    weight = torch.sqrt(t_norm.squeeze(-1))/torch.sqrt(1-t_norm.squeeze(-1))
+    # policy_loss *= weight    
+    
+    kl_loss = 5 * (lambda_kl / 2.0) * (scaling_term_2.squeeze(-1) * torch.norm(delta_v, dim=-1))**2
+    total_loss = 10*policy_loss + align_loss + kl_loss
+    total_loss = loss_agg_func(total_loss, loss_mask)
+
+    # ---------------------------
+    # metrics
+    # ---------------------------
+    with torch.no_grad():
+        policy_loss_mean = torch.where(
+            loss_mask,
+            policy_loss,
+            torch.zeros_like(policy_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        align_loss_mean = torch.where(
+            loss_mask,
+            align_loss,
+            torch.zeros_like(align_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        kl_loss_mean = torch.where(
+            loss_mask,
+            kl_loss,
+            torch.zeros_like(kl_loss),
+        ).sum() / (loss_mask.sum() + eps)
+        
+    metrics_data = {
+        "actor/total_loss": total_loss.detach(),
+        "actor/policy_loss": policy_loss_mean.detach(),
+        # "actor/L2_scale":scaling_term_1.mean().detach(),
+        # "actor/proj_scale":scaling_term_2.mean().detach(),
+        # "actor/L2_loss":torch.exp(logr1).mean().detach(),
+        # "actor/proj_loss":torch.exp(logr2).mean().detach(),
+        "actor/adv_mean": advantages.mean().detach(),
+        "actor/align_loss":align_loss_mean.detach(),
+        "actor/kl_loss":kl_loss_mean.detach(),
+        "actor/ratio_max": torch.max(ratio).detach(),
+        "actor/ratio_min": torch.min(ratio).detach(),
+        "actor/ratio_std": ratio.std().detach(),
+        "actor/clip_fraction":clip_fraction.detach(),
+        "actor/delta_v_norm": (delta_v**2).sum(dim=-1).mean().detach(),
+    }
+
+    return total_loss, metrics_data
+
+
+
+
+
+
+
+def compute_flow_surrogate_actor_loss(
+    load_noise: torch.Tensor,   # [B, K, D]
+    load_v_t: torch.Tensor,     # [B, K, D]
+    new_v_t: torch.Tensor,  # [B,K,D]
+    advantages: torch.Tensor,   # [B]
+    prev_x_t_std: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    loss_agg_func: Optional[Callable[..., torch.Tensor]] = None,
+    loss_mask_sum: Optional[torch.Tensor] = None,
+    loss_mask_ratio: Optional[torch.Tensor] = None,
+    norm_scale: Optional[torch.Tensor] = None,
+    use_gradient_reweight: Optional[bool] = False,
+    denoise_inds=None,
+    denoise_num_steps=None,
+    detach_v_norm:bool =True,
+    gamma=None,
+    eps=1e-8,
+    delta=1e-6,
+    beta_norm:float =0.1,
+    lambda_perp:float =1.0,
+    _beta: float = 6,
+    use_grad_clip: bool = True,
+    max_grad_proj: float = 5.0,
+    clip_ratio_low:float = 0.8,
+    clip_ratio_high:float = 1.2,
+    signal_scale:float =5,
+    **kwargs,
+):
+    """
+    Flow surrogate loss:
+        L = - E[ C_t * epsilon^T v_theta * A ]
+    """
+
+    assert load_noise.dtype == torch.float32
+    assert load_v_t.dtype == torch.float32
+    assert advantages.dtype == torch.float32
+    assert new_v_t.dtype == torch.float32
+    B, K, D = load_noise.shape
+
+    # print("denoise inds",denoise_inds)
+    # print("load_noise:",load_noise.shape)
+    # print("load_v_t",load_v_t.shape)
+    
+    t_values = torch.tensor([0.75, 0.75, 0.5, 0.25], 
+                          device=denoise_inds.device, dtype=torch.float32)
+    
+    t_norm = t_values[denoise_inds]
+    t_norm = t_norm[:,:1].unsqueeze(-1)
+    # print(t_norm)
+    scaling_term = torch.sqrt((1.0 - t_norm) / t_norm)
+    if loss_mask is None:
+        loss_mask = torch.ones((B, K), device=load_noise.device, dtype=torch.bool)
+        
+    if loss_agg_func is None:
+        def loss_agg_func(x, mask):
+            x = torch.where(mask, x, torch.zeros_like(x))
+            return x.sum() / (mask.sum() + 1e-8)
+    # expand advantage: [B] -> [B, 1]
+    adv = advantages[:, None]
+    score_new = (load_noise * new_v_t).sum(dim=-1) 
+    score_old = (load_noise * load_v_t).sum(dim=-1)
+    delta_s = score_new - score_old.detach()
+
+    ratio = torch.exp(_beta * delta_s)
+    # print("ratio min/max/mean:", ratio.min().item(), ratio.max().item(), ratio.mean().item())
+    # print("clamped_ratio:", torch.clamp(ratio, 1-clip_ratio_low, 1+clip_ratio_high))
+    ratio_clipped = torch.clamp(ratio, 1-clip_ratio_low, 1+clip_ratio_high)
+
+    surr1 = -ratio * adv
+    surr2 = -ratio_clipped * adv
+    # print("surr1",surr1)
+    # print("surr2",surr2)
+    clip_mask= surr1.detach()!=surr2.detach()
+    clip_fraction = clip_mask.count_nonzero()/loss_mask.count_nonzero()
+    policy_loss = torch.max(surr1, surr2)
+    
+    delta_v = new_v_t - load_v_t
+    perp_proj = delta_v - (torch.sum(delta_v * load_noise, dim=-1, keepdim=True) * load_noise)
+    perp_loss = lambda_perp * torch.sum(perp_proj ** 2, dim=-1)
+    
+    norm_diff = (torch.norm(new_v_t, dim=-1) - torch.norm(load_v_t + prev_x_t_std * load_noise, dim=-1)) ** 2
+    weight = torch.sigmoid(3*adv)
+    norm_loss = beta_norm * weight * norm_diff    #[B , action horizon]
+    
+    total_loss = 10*policy_loss + 5*perp_loss + norm_loss
+    
+   
+
+    if use_gradient_reweight:
+        K_steps = denoise_num_steps[0, 0].item()
+
+        def build_t(K, device):
+            return torch.linspace(1, 1 / K, K, device=device)
+
+        def compute_weight(K, device, a=1.0):
+            t = build_t(K, device)
+            delta_t = 1.0 / K
+            sigma = a * torch.sqrt(t / (1 - torch.where(t == 1, t[1], t)))
+            w = sigma * torch.sqrt(torch.tensor(delta_t, device=device))
+            return w
+
+        def normalize_weight(w, eps=1e-8):
+            return w / (w.mean() + eps)
+
+        w = compute_weight(K_steps, loss.device)
+        w = normalize_weight(w)
+
+        # select timestep weight
+        # denoise_inds: [B, K]
+        idx = denoise_inds[:, 1]  # [B]
+        scale = w[idx]            # [B]
+        scale = scale[:, None, None]  # [B,1,1]
+
+        loss = loss * scale
+
+    total_loss = loss_agg_func(total_loss, loss_mask)
+
+    # ---------------------------
+    # metrics
+    # ---------------------------
+    with torch.no_grad():
+        perp_loss_mean = torch.where(
+            loss_mask,
+            perp_loss,
+            torch.zeros_like(perp_loss),
+        ).sum() / (loss_mask.sum() + eps)
+
+        norm_loss_mean = torch.where(
+            loss_mask,
+            norm_loss,
+            torch.zeros_like(norm_loss),
+        ).sum() / (loss_mask.sum() + eps)
+
+        policy_loss_mean = torch.where(
+            loss_mask,
+            policy_loss,
+            torch.zeros_like(policy_loss),
+        ).sum() / (loss_mask.sum() + eps)
+
+    # print("load_v_t",load_v_t.requires_grad)
+    # print("load_noise",load_noise.requires_grad)
+    # print("new_v_t",new_v_t.requires_grad)
+    metrics_data = {
+        "actor/total_loss": total_loss.detach(),
+        "actor/policy_loss": policy_loss_mean.detach(),
+        "actor/perp_loss": perp_loss_mean.detach(),
+        "actor/norm_loss": norm_loss_mean.detach(),
+        "actor/adv_mean": advantages.mean().detach(),
+        "actor/adv_mean": advantages.mean().detach(),
+        # "actor/v_norm_mean": v_norm.mean().detach(),
+        # "actor/cos_abs_mean": cosine.abs().mean().detach(),
+        "actor/ratio_max": torch.max(ratio).detach(),
+        "actor/ratio_min": torch.min(ratio).detach(),
+        "actor/clip_fraction":clip_fraction.detach(),
+    }
+
+    return total_loss, metrics_data
+
+
 def compute_ppo_actor_loss(
     logprobs: torch.Tensor,
     old_logprobs: torch.Tensor,
@@ -183,7 +658,10 @@ def compute_ppo_actor_loss(
     denoise_num_steps=None,
     kl_beta=None,
     norm_scale=None,
+    gamma=None,
     use_gradient_reweight: Optional[bool]=False,
+    load_noise=None,
+    load_v_t=None,
     **kwargs,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -252,8 +730,13 @@ def compute_ppo_actor_loss(
     # approx_kl = torch.where(loss_mask, log_ratio.detach(), 0.0)
     #----wyh--
     
+    
+    print("load_noise:",load_noise.shape)
+    print("load_v_t:",load_v_t.shape)
+    print("advantage:",advantages.shape)
+    
     with torch.no_grad():
-        approx_kl = 0.5 * ((ratio - 1) - log_ratio).pow(2)
+        approx_kl = (ratio - 1) - log_ratio
         mean_kl = loss_agg_func(approx_kl, loss_mask, loss_mask_ratio)
     
     #--------
@@ -290,6 +773,8 @@ def compute_ppo_actor_loss(
         # policy_loss=policy_loss*(norm_scale/norm_scale.mean())
         policy_loss=policy_loss*scale
     #---------------------------------
+    target_mean_kl=0.1
+    kl_beta=kl_beta*(mean_kl/target_mean_kl)
     kl_loss =  kl_beta * mean_kl
     actor_loss = policy_loss + kl_loss
     
@@ -348,6 +833,7 @@ def compute_ppo_actor_loss(
         ),
         "actor/approx_kl": mean_kl.detach(),  #wyh
         "actor/clip_fraction": clip_fraction.detach(),
+        "actor/gamma_mean":gamma.mean().detach(),
     }
     return actor_loss, metrics_data
 
@@ -464,7 +950,9 @@ def compute_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
         Tuple[torch.Tensor, Dict]: Loss and metrics dictionary
     """
     metrics_data = {}
-    actor_loss, actor_metrics_data = compute_ppo_actor_loss(**kwargs)
+    # actor_loss, actor_metrics_data = compute_ppo_actor_loss(**kwargs)
+    # actor_loss, actor_metrics_data = compute_flow_surrogate_actor_loss(**kwargs)
+    actor_loss, actor_metrics_data = compute_loglik_surrogate_actor_loss(**kwargs)
     critic_loss, critic_metrics_data = compute_ppo_critic_loss(**kwargs)
 
     loss = actor_loss + critic_loss

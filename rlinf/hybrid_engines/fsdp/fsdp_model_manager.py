@@ -307,6 +307,11 @@ class FSDPModelManager:
             self.load_param_and_grad(self.device)
         if self.is_optimizer_offloaded:
             self.load_optimizer(self.device)
+            
+        for group in self.optimizer.param_groups:
+            if "initial_lr" in group:
+                del group["initial_lr"]    
+            
         self._strategy.load_checkpoint(
             self.model, self.optimizer, self.lr_scheduler, load_path
         )

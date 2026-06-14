@@ -251,6 +251,7 @@ class EmbodiedRunner:
     def run(self):
         start_step = self.global_step
         start_time = time.time()
+        best_eval_success_rate = 0.0
         for _step in range(start_step, self.max_steps):
             # set global step
             self.actor.set_global_step(self.global_step)
@@ -303,6 +304,10 @@ class EmbodiedRunner:
                         self.update_rollout_weights()
                         eval_metrics = self.evaluate()
                         eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                        eval_success_rate = eval_metrics["eval/success_once"]
+                        if eval_success_rate > best_eval_success_rate:
+                            best_eval_success_rate = eval_success_rate
+                            self._save_checkpoint()
                         self.metric_logger.log(data=eval_metrics, step=_step)
 
                 if save_model:

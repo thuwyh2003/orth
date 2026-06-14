@@ -330,7 +330,7 @@ class FSDPStrategyBase(ABC):
                 import glob
 
                 from torch.distributed import checkpoint as dcp
-
+                from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
                 dcp_dir = os.path.join(load_path, "dcp_checkpoint")
                 dcp_load_path = dcp_dir if os.path.isdir(dcp_dir) else load_path
 
@@ -345,10 +345,20 @@ class FSDPStrategyBase(ABC):
                         f"[Checkpoint] loading DCP checkpoint from {dcp_load_path}"
                     )
 
+                try:
+                    load_planner = DefaultLoadPlanner(
+                        strict = False,
+                        ignore_missing_keys = True,
+                    )    # plussed to ignore some missing keys in ckpt
+                except TypeError:
+                    load_planner = DefaultLoadPlanner()
+                
                 dcp.load(
                     {"fsdp_checkpoint": training_state},
                     checkpoint_id=dcp_load_path,
+                    planner=load_planner,
                 )
+                
         except BaseException as e:
             import traceback
 
