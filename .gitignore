@@ -32,3 +32,13 @@ venv/
 
 # vscode
 .vscode/
+
+*.csv
+*.pdf
+*.png
+
+demo.py
+
+plot.py
+
+toy_demo.py
