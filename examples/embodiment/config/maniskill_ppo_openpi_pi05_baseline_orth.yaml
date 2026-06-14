@@ -29,33 +29,26 @@ runner:
 
   max_epochs: 1000
   max_steps: -1
-  only_eval: True
-  val_check_interval: 10
-  save_interval: 50
+  only_eval: False
+  val_check_interval: 1
+  save_interval: 30
 
-  resume_dir: null
-  ckpt_path:  /home/wyh/RLinf/logs/20260611-19:40:31-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_372/actor/model_state_dict/full_weights.pt
-  # /home/wyh/RLinf/logs/20260608-03:48:32-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_401/actor/model_state_dict/full_weights.pt
-  # /data/temp/pi_rl_ppo_pi05_flow_sde/full_weights.pt
-  # /home/wyh/RLinf/logs/20260604-19:56:34-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_372/actor/model_state_dict/full_weights.pt
-  # /home/wyh/RLinf/logs/20260604-19:56:34-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_372/actor/model_state_dict/full_weights.pt
-  # /data/temp/20260506-15:29:24-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_280/actor/model_state_dict/full_weights.pt
-  # /home/wyh/RLinf/logs/20260604-19:56:34-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_372/actor/model_state_dict/full_weights.pt
-  # /data/temp/20260506-01:52:18-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_240/actor/model_state_dict/full_weights.pt
-  # /data/temp/20260423-17:36:19-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100/actor/model_state_dict/full_weights.pt
-  # /home/wyh/RLinf/logs/20260603-14:05:35-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_150/actor/model_state_dict/full_weights.pt
-  # /data/temp/20260423-17:36:19-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100/actor/model_state_dict/full_weights.pt
-  #  /home/wyh/RLinf/logs/20260527-03:10:00-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_250/actor/model_state_dict/full_weights.pt
-  
+  resume_dir: /home/wyh/RLinf/logs/20260604-16:12:33-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_361
+  # /data/temp/20260603-14:05:35-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_150
+  # /data/temp/20260603-00:28:21-maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100
+  # /home/wyh/RLinf/logs/20260528-15:12:10-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100
+  # /home/wyh/RLinf/logs/20260527-03:10:00-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_250
+  # /home/wyh/RLinf/logs/20260526-21:03:57-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_150
+  ckpt_path: null
 
 algorithm:
   normalize_advantages: True
   kl_penalty: kl
-  group_size: 4
+  group_size: 1
   reward_coef: 1.0
 
-  rollout_epoch: 2
-  eval_rollout_epoch: 2
+  rollout_epoch: 4
+  eval_rollout_epoch: 4
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
@@ -68,8 +61,8 @@ algorithm:
   bootstrap_type: always
   kl_beta: 0.0
   entropy_bonus: 0.005
-  clip_ratio_high: 0.2
-  clip_ratio_low: 0.2
+  clip_ratio_high: 0.25
+  clip_ratio_low: 0.25
   clip_ratio_c: 3.0
   value_clip: 0.2
   huber_delta: 10.0
@@ -98,7 +91,7 @@ env:
   group_name: "EnvGroup"
 
   train:
-    total_num_envs: 40
+    total_num_envs: 64
     auto_reset: True
     use_fixed_reset_state_ids: False
     max_episode_steps: 80
@@ -112,7 +105,7 @@ env:
   eval:
     total_num_envs: 64
     auto_reset: True
-    ignore_terminations: true
+    ignore_terminations: True
     max_episode_steps: 80
     max_steps_per_rollout_epoch: 80
     use_fixed_reset_state_ids: True
@@ -120,12 +113,12 @@ env:
     is_eval: True
     enable_offload: False
     video_cfg:
-      save_video: False 
+      save_video: False
       video_base_dir: ${runner.logger.log_path}/video/eval
     init_params:
       use_multiple_plates: False
       id: "PutOnPlateInScene25Plate-v1"
-      # obj_set: "train"
+      obj_set: "test"
 
 rollout:
   group_name: "RolloutGroup"
@@ -142,8 +135,8 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 24
-  global_batch_size: 192
+  micro_batch_size: 32
+  global_batch_size: 512
   seed: 0
   enable_offload: True
 
@@ -161,13 +154,14 @@ actor:
     openpi:
       config_name: "pi05_maniskill"
       num_images_in_input: 1
-      noise_level: 0.5
+      noise_level: 0.4
       action_chunk: ${actor.model.num_action_chunks}
       num_steps: ${actor.model.num_steps}
       train_expert_only: True
       action_env_dim: ${actor.model.action_dim}
       noise_method: "flow_sde"
       use_orth_noise: False
+      orth_new: True
       use_gradient_reweight: False  
       action_horizon: 8
       # noise_params: [0.16, 0.12, 200]

@@ -34,12 +34,12 @@ runner:
   save_interval: 50
 
   resume_dir: null
-  ckpt_path: /data/temp/20260424-08:49:42-maniskill_ppo_openpi_pi05_reweight/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100/actor/model_state_dict/full_weights.pt
-
+  # ckpt_path: /data/temp/20260424-08:49:42-maniskill_ppo_openpi_pi05_reweight/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_100/actor/model_state_dict/full_weights.pt
+  ckpt_path: null
 algorithm:
   normalize_advantages: True
   kl_penalty: kl
-  group_size: 1
+  group_size: 4
   reward_coef: 1.0
 
   rollout_epoch: 2

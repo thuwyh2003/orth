@@ -34,16 +34,19 @@ runner:
   save_interval: 50
 
   resume_dir: null
-  ckpt_path: /home/wyh/RLinf/logs/20260428-15:29:52-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_250/actor/model_state_dict/full_weights.pt
+  ckpt_path: /data/temp/20260506-01:52:18-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_240/actor/model_state_dict/full_weights.pt
+  # ckpt_path:  /data/temp/pi_rl_ppo_pi05_flow_sde/full_weights.pt
+  # /data/temp/pi_rl_ppo_pi05_flow_sde/full_weights.pt
+  # ckpt_path: /home/wyh/RLinf/logs/20260512-01:09:19-maniskill_ppo_openpi_pi05_orth/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_320/actor/model_state_dict/full_weights.pt
 
 algorithm:
   normalize_advantages: True
   kl_penalty: kl
-  group_size: 4
+  group_size: 1
   reward_coef: 1.0
 
   rollout_epoch: 2
-  eval_rollout_epoch: 8
+  eval_rollout_epoch: 4
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
@@ -71,7 +74,7 @@ algorithm:
   sampling_params:
     do_sample: True
     temperature_train: 1.0
-    temperature_eval: 0.6
+    temperature_eval: 0.1
     top_k: 50
     top_p: 1.0
     repetition_penalty: 1.0
@@ -98,7 +101,7 @@ env:
       use_multiple_plates: False
 
   eval:
-    total_num_envs: 24
+    total_num_envs: 312
     auto_reset: True
     ignore_terminations: True
     max_episode_steps: 80
@@ -130,7 +133,7 @@ actor:
   training_backend: "fsdp"
   micro_batch_size: 24
   global_batch_size: 144
-  seed: 0
+  seed: 1
   enable_offload: True
 
   model:
