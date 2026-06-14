@@ -1,587 +1,1149 @@
-# import os
-# import time
+# # import gymnasium as gym
+# # import torch
+# # import torch.nn as nn
+# # import torch.optim as optim
+# # import numpy as np
+# # import random
+# # from collections import deque
+
+# # # ============================================================
+# # # Config
+# # # ============================================================
+
+# # ENV_NAME = "LunarLanderContinuous-v2"
+
+# # GAMMA = 0.99
+# # GAE_LAMBDA = 0.95
+
+# # LR = 3e-4
+
+# # CLIP_EPS = 0.2
+
+# # ENTROPY_COEF = 0.01
+# # VALUE_COEF = 0.5
+
+# # MAX_GRAD_NORM = 0.5
+
+# # ROLLOUT_STEPS = 2048
+# # UPDATE_EPOCHS = 10
+# # MINIBATCH_SIZE = 256
+
+# # TOTAL_UPDATES = 250
+
+# # SEED = 42
+
+# # DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# # # ============================================================
+# # # Seed
+# # # ============================================================
+
+# # def set_seed(seed):
+# #     torch.manual_seed(seed)
+# #     np.random.seed(seed)
+# #     random.seed(seed)
+
+
+# # # ============================================================
+# # # GAE
+# # # ============================================================
+
+# # def compute_gae(
+# #     rewards,
+# #     values,
+# #     dones,
+# #     next_value,
+# #     gamma=0.99,
+# #     lam=0.95,
+# # ):
+# #     advantages = []
+
+# #     gae = 0.0
+
+# #     values = values + [next_value]
+
+# #     for t in reversed(range(len(rewards))):
+
+# #         mask = 1.0 - dones[t]
+
+# #         delta = (
+# #             rewards[t]
+# #             + gamma * values[t + 1] * mask
+# #             - values[t]
+# #         )
+
+# #         gae = delta + gamma * lam * mask * gae
+
+# #         advantages.insert(0, gae)
+
+# #     advantages = torch.FloatTensor(advantages)
+
+# #     returns = advantages + torch.FloatTensor(values[:-1])
+
+# #     return advantages, returns
+
+
+# # # ============================================================
+# # # Actor Critic
+# # # ============================================================
+
+# # class ActorCritic(nn.Module):
+
+# #     def __init__(self, state_dim, action_dim):
+# #         super().__init__()
+
+# #         self.shared = nn.Sequential(
+# #             nn.Linear(state_dim, 128),
+# #             nn.Tanh(),
+# #             nn.Linear(128, 128),
+# #             nn.Tanh(),
+# #         )
+
+# #         self.actor_mean = nn.Linear(128, action_dim)
+
+# #         self.log_std = nn.Parameter(torch.zeros(action_dim))
+
+# #         self.critic = nn.Linear(128, 1)
+
+# #     def forward(self, x):
+
+# #         feat = self.shared(x)
+
+# #         mean = self.actor_mean(feat)
+
+# #         std = self.log_std.exp().expand_as(mean)
+
+# #         value = self.critic(feat).squeeze(-1)
+
+# #         return mean, std, value
+
+# #     def get_dist(self, x):
+
+# #         mean, std, value = self.forward(x)
+
+# #         dist = torch.distributions.Normal(mean, std)
+
+# #         return dist, mean, value
+
+# #     def sample_action(self, x):
+
+# #         dist, mean, value = self.get_dist(x)
+
+# #         action = dist.rsample()
+
+# #         logp = dist.log_prob(action).sum(dim=-1)
+
+# #         entropy = dist.entropy().sum(dim=-1)
+
+# #         return action, logp, entropy, value, mean, dist
+
+
+# # # ============================================================
+# # # Rollout Buffer
+# # # ============================================================
+
+# # class RolloutBuffer:
+
+# #     def __init__(self):
+
+# #         self.states = []
+# #         self.actions = []
+
+# #         self.logps = []
+
+# #         self.rewards = []
+# #         self.dones = []
+
+# #         self.values = []
+
+# #         self.epsilons = []
+
+# #     def clear(self):
+# #         self.__init__()
+
+
+# # # ============================================================
+# # # Standard PPO Loss
+# # # ============================================================
+
+# # def standard_ppo_loss(
+# #     logp_new,
+# #     logp_old,
+# #     advantages,
+# #     clip_eps=0.2,
+# # ):
+
+# #     ratio = torch.exp(logp_new - logp_old)
+
+# #     surr1 = ratio * advantages
+
+# #     surr2 = (
+# #         torch.clamp(
+# #             ratio,
+# #             1 - clip_eps,
+# #             1 + clip_eps,
+# #         )
+# #         * advantages
+# #     )
+
+# #     policy_loss = -torch.min(surr1, surr2).mean()
+
+# #     approx_kl = (logp_old - logp_new).mean().item()
+
+# #     clip_frac = (
+# #         ((ratio - 1.0).abs() > clip_eps)
+# #         .float()
+# #         .mean()
+# #         .item()
+# #     )
+
+# #     return policy_loss, approx_kl, clip_frac
+
+
+# # # ============================================================
+# # # Velocity Weighted PPO Loss
+# # # ============================================================
+
+# # def velocity_weighted_ppo_loss(
+# #     logp_new,
+# #     logp_old,
+# #     advantages,
+# #     epsilon,
+# #     v_theta,
+# #     clip_eps=0.2,
+
+# #     # 推荐默认配置
+# #     use_direction_only=True,
+# #     detach_alignment=True,
+# #     squared_alignment=True,
+# #     positive_only=False,
+# # ):
+
+# #     ratio = torch.exp(logp_new - logp_old)
+
+# #     # --------------------------------------------------------
+# #     # velocity normalization
+# #     # --------------------------------------------------------
+
+# #     if use_direction_only:
+
+# #         v_norm = (
+# #             torch.norm(
+# #                 v_theta,
+# #                 p=2,
+# #                 dim=-1,
+# #                 keepdim=True,
+# #             )
+# #             + 1e-8
+# #         )
+
+# #         v_used = v_theta / v_norm
+
+# #     else:
+
+# #         v_used = v_theta
+
+# #     # --------------------------------------------------------
+# #     # epsilon projection
+# #     # --------------------------------------------------------
+
+# #     alignment = (epsilon * v_used).sum(dim=-1)
+
+# #     # --------------------------------------------------------
+# #     # optional positive-only
+# #     # --------------------------------------------------------
+
+# #     if positive_only:
+# #         alignment = torch.relu(alignment)
+
+# #     # --------------------------------------------------------
+# #     # squared alignment
+# #     # --------------------------------------------------------
+
+# #     if squared_alignment:
+# #         alignment = alignment.pow(2)
+
+# #     # --------------------------------------------------------
+# #     # stop-gradient (推荐)
+# #     # --------------------------------------------------------
+
+# #     if detach_alignment:
+# #         alignment = alignment.detach()
+
+# #     # --------------------------------------------------------
+# #     # PPO surrogate
+# #     # --------------------------------------------------------
+
+# #     surr1 = ratio * alignment * advantages
+
+# #     surr2 = (
+# #         torch.clamp(
+# #             ratio,
+# #             1 - clip_eps,
+# #             1 + clip_eps,
+# #         )
+# #         * alignment
+# #         * advantages
+# #     )
+
+# #     policy_loss = -torch.min(surr1, surr2).mean()
+
+# #     approx_kl = (logp_old - logp_new).mean().item()
+
+# #     clip_frac = (
+# #         ((ratio - 1.0).abs() > clip_eps)
+# #         .float()
+# #         .mean()
+# #         .item()
+# #     )
+
+# #     alignment_mean = alignment.mean().item()
+
+# #     return (
+# #         policy_loss,
+# #         approx_kl,
+# #         clip_frac,
+# #         alignment_mean,
+# #     )
+
+
+# # # ============================================================
+# # # Train
+# # # ============================================================
+
+# # def train(
+# #     use_velocity_weighted=True,
+# #     seed=42,
+# # ):
+
+# #     set_seed(seed)
+
+# #     env = gym.make(ENV_NAME)
+
+# #     env.reset(seed=seed)
+
+# #     state_dim = env.observation_space.shape[0]
+
+# #     action_dim = env.action_space.shape[0]
+
+# #     model = ActorCritic(
+# #         state_dim,
+# #         action_dim,
+# #     ).to(DEVICE)
+
+# #     optimizer = optim.Adam(
+# #         model.parameters(),
+# #         lr=LR,
+# #     )
+
+# #     buffer = RolloutBuffer()
+
+# #     # --------------------------------------------------------
+# #     # logging
+# #     # --------------------------------------------------------
+
+# #     episode_rewards = deque(maxlen=50)
+
+# #     total_env_steps = 0
+
+# #     total_episodes = 0
+
+# #     best_avg_reward = -1e9
+
+# #     # --------------------------------------------------------
+# #     # initial reset
+# #     # --------------------------------------------------------
+
+# #     state, _ = env.reset()
+
+# #     current_episode_reward = 0.0
+
+# #     # ========================================================
+# #     # UPDATE LOOP
+# #     # ========================================================
+
+# #     for update in range(1, TOTAL_UPDATES + 1):
+
+# #         buffer.clear()
+
+# #         # ====================================================
+# #         # COLLECT ROLLOUT
+# #         # ====================================================
+
+# #         for step in range(ROLLOUT_STEPS):
+
+# #             state_t = (
+# #                 torch.FloatTensor(state)
+# #                 .unsqueeze(0)
+# #                 .to(DEVICE)
+# #             )
+
+# #             with torch.no_grad():
+
+# #                 (
+# #                     action,
+# #                     logp,
+# #                     entropy,
+# #                     value,
+# #                     mean,
+# #                     dist,
+# #                 ) = model.sample_action(state_t)
+
+# #             action_np = action.squeeze(0).cpu().numpy()
+
+# #             next_state, reward, terminated, truncated, _ = env.step(
+# #                 action_np
+# #             )
+
+# #             done = terminated or truncated
+
+# #             # =================================================
+# #             # epsilon
+# #             # =================================================
+
+# #             epsilon = (
+# #                 (action - mean)
+# #                 / (dist.scale + 1e-8)
+# #             ).squeeze(0)
+
+# #             # =================================================
+# #             # store rollout
+# #             # =================================================
+
+# #             buffer.states.append(state)
+
+# #             buffer.actions.append(
+# #                 action.squeeze(0).cpu()
+# #             )
+
+# #             buffer.logps.append(
+# #                 logp.squeeze(0).cpu()
+# #             )
+
+# #             buffer.rewards.append(reward)
+
+# #             buffer.dones.append(float(done))
+
+# #             buffer.values.append(value.item())
+
+# #             buffer.epsilons.append(
+# #                 epsilon.cpu()
+# #             )
+
+# #             # =================================================
+# #             # update env state
+# #             # =================================================
+
+# #             state = next_state
+
+# #             current_episode_reward += reward
+
+# #             total_env_steps += 1
+
+# #             # =================================================
+# #             # episode done
+# #             # =================================================
+
+# #             if done:
+
+# #                 episode_rewards.append(
+# #                     current_episode_reward
+# #                 )
+
+# #                 total_episodes += 1
+
+# #                 current_episode_reward = 0.0
+
+# #                 state, _ = env.reset()
+
+# #         # ====================================================
+# #         # Bootstrap value
+# #         # ====================================================
+
+# #         with torch.no_grad():
+
+# #             next_state_t = (
+# #                 torch.FloatTensor(state)
+# #                 .unsqueeze(0)
+# #                 .to(DEVICE)
+# #             )
+
+# #             _, _, next_value = model.forward(next_state_t)
+
+# #             next_value = next_value.item()
+
+# #         # ====================================================
+# #         # GAE
+# #         # ====================================================
+
+# #         advantages, returns = compute_gae(
+# #             rewards=buffer.rewards,
+# #             values=buffer.values,
+# #             dones=buffer.dones,
+# #             next_value=next_value,
+# #             gamma=GAMMA,
+# #             lam=GAE_LAMBDA,
+# #         )
+
+# #         advantages = (
+# #             advantages - advantages.mean()
+# #         ) / (advantages.std() + 1e-8)
+
+# #         # ====================================================
+# #         # Tensorize
+# #         # ====================================================
+
+# #         states_t = torch.FloatTensor(
+# #             np.array(buffer.states)
+# #         ).to(DEVICE)
+
+# #         actions_t = torch.stack(
+# #             buffer.actions
+# #         ).to(DEVICE)
+
+# #         old_logps_t = torch.stack(
+# #             buffer.logps
+# #         ).to(DEVICE)
+
+# #         epsilons_t = torch.stack(
+# #             buffer.epsilons
+# #         ).to(DEVICE)
+
+# #         advantages_t = advantages.to(DEVICE)
+
+# #         returns_t = returns.to(DEVICE)
+
+# #         dataset_size = states_t.shape[0]
+
+# #         # ====================================================
+# #         # PPO UPDATE
+# #         # ====================================================
+
+# #         policy_loss_value = 0.0
+# #         value_loss_value = 0.0
+# #         entropy_value = 0.0
+
+# #         approx_kl_value = 0.0
+# #         clip_frac_value = 0.0
+
+# #         alignment_value = 0.0
+
+# #         for epoch in range(UPDATE_EPOCHS):
+
+# #             indices = np.random.permutation(dataset_size)
+
+# #             for start in range(
+# #                 0,
+# #                 dataset_size,
+# #                 MINIBATCH_SIZE,
+# #             ):
+
+# #                 end = start + MINIBATCH_SIZE
+
+# #                 mb_idx = indices[start:end]
+
+# #                 mb_states = states_t[mb_idx]
+
+# #                 mb_actions = actions_t[mb_idx]
+
+# #                 mb_old_logps = old_logps_t[mb_idx]
+
+# #                 mb_advantages = advantages_t[mb_idx]
+
+# #                 mb_returns = returns_t[mb_idx]
+
+# #                 mb_eps = epsilons_t[mb_idx]
+
+# #                 # =============================================
+# #                 # current policy
+# #                 # =============================================
+
+# #                 dist, mean_new, value_new = (
+# #                     model.get_dist(mb_states)
+# #                 )
+
+# #                 logp_new = dist.log_prob(
+# #                     mb_actions
+# #                 ).sum(dim=-1)
+
+# #                 entropy = (
+# #                     dist.entropy()
+# #                     .sum(dim=-1)
+# #                     .mean()
+# #                 )
+
+# #                 # =============================================
+# #                 # policy loss
+# #                 # =============================================
+
+# #                 if use_velocity_weighted:
+
+# #                     (
+# #                         policy_loss,
+# #                         approx_kl,
+# #                         clip_frac,
+# #                         alignment_mean,
+# #                     ) = velocity_weighted_ppo_loss(
+# #                         logp_new=logp_new,
+# #                         logp_old=mb_old_logps,
+# #                         advantages=mb_advantages,
+# #                         epsilon=mb_eps,
+# #                         v_theta=mean_new,
+# #                         clip_eps=CLIP_EPS,
+# #                     )
+
+# #                 else:
+
+# #                     (
+# #                         policy_loss,
+# #                         approx_kl,
+# #                         clip_frac,
+# #                     ) = standard_ppo_loss(
+# #                         logp_new=logp_new,
+# #                         logp_old=mb_old_logps,
+# #                         advantages=mb_advantages,
+# #                         clip_eps=CLIP_EPS,
+# #                     )
+
+# #                     alignment_mean = 0.0
+
+# #                 # =============================================
+# #                 # value loss
+# #                 # =============================================
+
+# #                 value_loss = (
+# #                     (value_new - mb_returns)
+# #                     .pow(2)
+# #                     .mean()
+# #                 )
+
+# #                 # =============================================
+# #                 # total loss
+# #                 # =============================================
+
+# #                 loss = (
+# #                     policy_loss
+# #                     + VALUE_COEF * value_loss
+# #                     - ENTROPY_COEF * entropy
+# #                 )
+
+# #                 optimizer.zero_grad()
+
+# #                 loss.backward()
+
+# #                 grad_norm = torch.nn.utils.clip_grad_norm_(
+# #                     model.parameters(),
+# #                     MAX_GRAD_NORM,
+# #                 )
+
+# #                 optimizer.step()
+
+# #                 # =============================================
+# #                 # logging
+# #                 # =============================================
+
+# #                 policy_loss_value = policy_loss.item()
+
+# #                 value_loss_value = value_loss.item()
+
+# #                 entropy_value = entropy.item()
+
+# #                 approx_kl_value = approx_kl
+
+# #                 clip_frac_value = clip_frac
+
+# #                 alignment_value = alignment_mean
+
+# #         # ====================================================
+# #         # Update logging
+# #         # ====================================================
+
+# #         avg_reward = (
+# #             np.mean(episode_rewards)
+# #             if len(episode_rewards) > 0
+# #             else 0.0
+# #         )
+
+# #         best_avg_reward = max(
+# #             best_avg_reward,
+# #             avg_reward,
+# #         )
+
+# #         print(
+# #             f"\n"
+# #             f"========================================================\n"
+# #             f"Update            : {update:4d}/{TOTAL_UPDATES}\n"
+# #             f"Method            : "
+# #             f"{'VelocityWeightedPPO' if use_velocity_weighted else 'StandardPPO'}\n"
+# #             f"Env Steps         : {total_env_steps:8d}\n"
+# #             f"Episodes          : {total_episodes:6d}\n"
+# #             f"Avg Reward (50ep) : {avg_reward:8.2f}\n"
+# #             f"Best Avg Reward   : {best_avg_reward:8.2f}\n"
+# #             f"\n"
+# #             f"Policy Loss       : {policy_loss_value:8.4f}\n"
+# #             f"Value Loss        : {value_loss_value:8.4f}\n"
+# #             f"Entropy           : {entropy_value:8.4f}\n"
+# #             f"Approx KL         : {approx_kl_value:8.6f}\n"
+# #             f"Clip Fraction     : {clip_frac_value:8.4f}\n"
+# #             f"Alignment Mean    : {alignment_value:8.4f}\n"
+# #             f"Grad Norm         : {grad_norm:8.4f}\n"
+# #             f"========================================================"
+# #         )
+
+# #     env.close()
+
+# #     return best_avg_reward
+
+
+# # # ============================================================
+# # # Main
+# # # ============================================================
+
+# # if __name__ == "__main__":
+
+# #     print("\n==============================")
+# #     print(" Standard PPO")
+# #     print("==============================")
+
+# #     std_reward = train(
+# #         use_velocity_weighted=False,
+# #         seed=SEED,
+# #     )
+
+# #     print("\n==============================")
+# #     print(" Velocity Weighted PPO")
+# #     print("==============================")
+
+# #     vel_reward = train(
+# #         use_velocity_weighted=True,
+# #         seed=SEED,
+# #     )
+
+# #     print("\n==============================")
+# #     print(" Final Result")
+# #     print("==============================")
+
+# #     print(f"Standard PPO Best Avg Reward : {std_reward:.2f}")
+
+# #     print(f"Velocity Weighted PPO Best Avg Reward : {vel_reward:.2f}")
+    
+
+# import gymnasium as gym
 # import torch
 # import torch.nn as nn
 # import torch.optim as optim
-# import gymnasium as gym
 # import numpy as np
-# from torch.distributions import Categorical
-# from torch.utils.tensorboard import SummaryWriter
-# device = "cuda" if torch.cuda.is_available() else "cpu"
-# print(f"Using device: {device}")
+# import random
+# from collections import deque
+# from torch.utils.tensorboard import SummaryWriter   # ⭐ NEW
 
 
-# # ========================
-# # Actor-Critic Network
-# # ========================
+# # ============================================================
+# # Config
+# # ============================================================
+
+# # ENV_NAME = "LunarLanderContinuous-v2"
+# ENV_NAME = "Walker2d-v4"
+
+# GAMMA = 0.99
+# GAE_LAMBDA = 0.95
+
+# LR = 3e-4
+
+# CLIP_EPS = 0.2
+
+# ENTROPY_COEF = 0.01
+# VALUE_COEF = 0.5
+
+# MAX_GRAD_NORM = 0.5
+
+# ROLLOUT_STEPS = 2048
+# UPDATE_EPOCHS = 10
+# MINIBATCH_SIZE = 256
+
+# TOTAL_UPDATES = 250
+
+# SEED = 42
+
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# # ============================================================
+# # TensorBoard helper ⭐ NEW
+# # ============================================================
+
+# def make_writer(use_velocity):
+#     return SummaryWriter(
+#         log_dir=f"runs/{'velocity_ppo' if use_velocity else 'ppo'}_seed{SEED}_env{ENV_NAME}"
+#     )
+
+
+# # ============================================================
+# # Seed
+# # ============================================================
+
+# def set_seed(seed):
+#     torch.manual_seed(seed)
+#     np.random.seed(seed)
+#     random.seed(seed)
+
+
+# # ============================================================
+# # GAE
+# # ============================================================
+
+# def compute_gae(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
+
+#     advantages = []
+#     gae = 0.0
+#     values = values + [next_value]
+
+#     for t in reversed(range(len(rewards))):
+
+#         mask = 1.0 - dones[t]
+
+#         delta = rewards[t] + gamma * values[t + 1] * mask - values[t]
+
+#         gae = delta + gamma * lam * mask * gae
+
+#         advantages.insert(0, gae)
+
+#     advantages = torch.FloatTensor(advantages)
+#     returns = advantages + torch.FloatTensor(values[:-1])
+
+#     return advantages, returns
+
+
+# # ============================================================
+# # Actor Critic
+# # ============================================================
+
 # class ActorCritic(nn.Module):
-#     def __init__(self, obs_dim, act_dim):
+
+#     def __init__(self, state_dim, action_dim):
 #         super().__init__()
+
 #         self.shared = nn.Sequential(
-#             nn.Linear(obs_dim, 64),
+#             nn.Linear(state_dim, 128),
 #             nn.Tanh(),
-#             nn.Linear(64, 64),
+#             nn.Linear(128, 128),
 #             nn.Tanh(),
 #         )
-#         self.actor = nn.Linear(64, act_dim)
-#         self.critic = nn.Linear(64, 1)
+
+#         self.actor_mean = nn.Linear(128, action_dim)
+#         self.log_std = nn.Parameter(torch.zeros(action_dim))
+#         self.critic = nn.Linear(128, 1)
 
 #     def forward(self, x):
-#         x = self.shared(x)
-#         logits = self.actor(x)
-#         value = self.critic(x)
-#         return logits, value
 
-#     def get_action_and_value(self, obs):
-#         logits, value = self.forward(obs)
-#         dist = Categorical(logits=logits)
-#         action = dist.sample()
-#         log_prob = dist.log_prob(action)
-#         return action, log_prob, value.squeeze(-1), dist
+#         feat = self.shared(x)
+#         mean = self.actor_mean(feat)
+#         std = self.log_std.exp().expand_as(mean)
+#         value = self.critic(feat).squeeze(-1)
 
+#         return mean, std, value
 
-# # ========================
-# # GAE (VectorEnv 版本)
-# # ========================
-# @torch.no_grad()
-# def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
-#     """rewards, values, dones: shape (steps, num_envs)"""
-#     steps, num_envs = rewards.shape
-#     advantages = torch.zeros_like(rewards, device=device)
-#     last_gae = torch.zeros(num_envs, device=device)
-#     for t in reversed(range(steps)):
-#         if t == steps - 1:
-#             next_value = last_value
-#         else:
-#             next_value = values[t + 1]
+#     def get_dist(self, x):
+#         mean, std, value = self.forward(x)
+#         dist = torch.distributions.Normal(mean, std)
+#         return dist, mean, value
 
-#         delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
-#         last_gae = delta + gamma * lam * (1 - dones[t]) * last_gae
-#         advantages[t] = last_gae
-
-#     returns = advantages + values
-#     return advantages, returns
-#     # for t in reversed(range(steps)):
-#     #     next_value = torch.zeros(num_envs, device=device) if t == steps - 1 else values[t + 1]
-#     #     delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
-#     #     last_gae = delta + gamma * lam * (1 - dones[t]) * last_gae
-#     #     advantages[t] = last_gae
-
-#     # return advantages, advantages + values
+#     def sample_action(self, x):
+#         dist, mean, value = self.get_dist(x)
+#         # action = dist.rsample()
+#         action = torch.tanh(dist.rsample())
+#         logp = dist.log_prob(action).sum(dim=-1)
+#         entropy = dist.entropy().sum(dim=-1)
+#         return action, logp, entropy, value, mean, dist
 
 
-# # ========================
-# # 安全版 Hessian Trace Estimator（曲率估计）
-# # ========================
-# def hessian_trace_estimate(loss, model):
-#     params = [p for p in model.parameters() if p.requires_grad]
-#     grads = torch.autograd.grad(
-#     loss, params,
-#     create_graph=True,
-#     allow_unused=True
-#     )
-#     grads = [g for g in grads if g is not None]
-
-#     # 2. 采样和梯度一样结构的随机噪声 z
-#     z = [torch.randn_like(g) for g in grads]
-
-#     # 3. 计算 H * z （核心！不会有形状错误）
-#     H_z = torch.autograd.grad(
-#         grads, params,
-#         grad_outputs=z,
-#         retain_graph=True,
-#         allow_unused=True
-#     )
-#     H_z = [g for g in H_z if g is not None]
-
-#     # 4. 计算 z^T H z （迹的无偏估计）
-#     trace = 0.0
-#     for zi, hzi in zip(z, H_z):
-#         trace += (zi * hzi).sum()
-    
-#     return trace
-#     # """Hutchinson 方法估计 Hessian trace（已处理 grad_fn 问题）"""
-#     # model.zero_grad()
-#     # params = [p for p in model.parameters() if p.requires_grad]
-
-#     # # 第一步：计算一阶梯度（保留计算图）
-#     # grads = torch.autograd.grad(
-#     #     loss, params,
-#     #     create_graph=True,
-#     #     retain_graph=True,
-#     #     allow_unused=True
-#     # )
-
-#     # g_vec = torch.cat([g.reshape(-1) for g in grads if g is not None])
-
-#     # # 随机向量 v
-#     # v = [torch.randn_like(p) for p in params]
-#     # # v = v / (v.norm() + 1e-8)
-#     # print("g_vec",g_vec.shape)
-#     # for p in params:
-#     #     print("p",p.shape)
-
-#     # # 计算 Hv = ∇²loss · v
-#     # Hv = torch.autograd.grad(
-#     #     g_vec,
-#     #     params,
-#     #     grad_outputs=v,
-#     #     retain_graph=False,
-#     #     allow_unused=True
-#     # )
-
-#     # Hv_vec = torch.cat([h.reshape(-1) for h in Hv if h is not None])
-#     # print("Hv_vec",Hv_vec.shape)
-#     # # trace = torch.dot(v, Hv_vec).item()
-#     # trace = (torch.cat([vv.flatten() for vv in v]) * Hv_vec).sum()
-#     # return max(trace, 1e-6)  # 避免除零
-
-
-# # ========================
-# # 动态正交梯度噪声（根据曲率自适应）
-# # ========================
-# # @torch.no_grad()
-# def apply_orthogonal_gradient_noise(model, loss, base_scale=5e-4, compute_trace_every=5):
-#     """正交噪声 + 曲率自适应 scale"""
-#     # 计算一阶梯度（保留图给后面的 backward）
-#     grads = torch.autograd.grad(
-#         loss, model.parameters(),
-#         create_graph=False,
-#         retain_graph=True,
-#         allow_unused=True
-#     )
-
-#     grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(grads, model.parameters())]
-#     grads = [g.unsqueeze(1) if g.dim()==1 else g for g in grads]
-#     noise = [torch.randn_like(g) for g in grads]
-
-#     g_dot_v = []
-#     g_norm_sq = []
-
-#     for i, (g,v) in enumerate(zip(grads, noise)):
-#         g_dot_v.append((g * v).sum(dim=1,keepdim=True))
-#         g_norm_sq.append((g **2).sum(dim=1,keepdim=True))
-
-#     for i in range(len(noise)):
-#         # print(noise[i].shape,grads[i].shape,(g_dot_v[i]/g_norm_sq[i]).shape)
-#         noise[i] = noise[i] -(g_dot_v[i]/g_norm_sq[i]) * grads[i]
-        
-
-#     trace = hessian_trace_estimate(loss, model)
-#     noise_scale = base_scale / (np.sqrt(abs(trace.cpu())) + 1e-6)
-#     # for p,g,z in zip(model.parameters(),grads,noise):
-#         # print(p,noise_scale * z)
-#     #     print("p mean",g.mean(),"z mean",(noise_scale * z).mean())
-#     # breakpoint()
-#     # noisy_params = [p + noise_scale * z for p, z in zip(model.parameters(), noise)]
-#     # noisy_params = [noisy_param.squeeze(1) if noisy_param.shape[1]==1 else noisy_param for noisy_param in noisy_params ]
-#     noisy_grads = [g + noise_scale * z for g, z in zip(grads, noise)]
-#     noisy_grads = [noisy_grad.squeeze(1) if noisy_grad.shape[1]==1 else noisy_grad for noisy_grad in noisy_grads ]
-#     return noisy_grads, float(noise_scale)
-
-
-# def assign_grads(model, grads):
-#     for p, g in zip(model.parameters(), grads):
-#         if g is None:
-#             continue
-#         if p.grad is None:
-#             p.grad = g.detach().clone()
-#         else:
-#             p.grad.copy_(g.detach())
-
-# def update_params(model,params):
-#     print("update params")
-#     for p, v in zip(model.parameters(), params):
-#         p = v.detach()
-    
-# # ========================
+# # ============================================================
 # # PPO Loss
-# # ========================
-# def ppo_loss(new_logp, old_logp, adv, entropy, clip=0.2, ent_coef=0.01):
-#     ratio = torch.exp(new_logp - old_logp)
-#     clipped_ratio = torch.clamp(ratio, 1 - clip, 1 + clip)
-#     surrogate = torch.min(ratio * adv, clipped_ratio * adv)
-#     return -torch.mean(surrogate)-ent_coef * entropy.mean()
+# # ============================================================
+
+# def standard_ppo_loss(logp_new, logp_old, advantages, clip_eps=0.2):
+
+#     ratio = torch.exp(logp_new - logp_old)
+
+#     surr1 = ratio * advantages
+#     surr2 = torch.clamp(ratio, 1-clip_eps, 1+clip_eps) * advantages
+
+#     policy_loss = -torch.min(surr1, surr2).mean()
+
+#     approx_kl = (logp_old - logp_new).mean().item()
+
+#     clip_frac = ((ratio - 1.0).abs() > clip_eps).float().mean().item()
+
+#     return policy_loss, approx_kl, clip_frac
 
 
-# def approx_kl(new_logp, old_logp):
-#     return 0.5 * torch.mean((new_logp - old_logp) ** 2)
-#     # return torch.mean(old_logp - new_logp)
+# # ============================================================
+# # Velocity PPO Loss
+# # ============================================================
+
+# def velocity_weighted_ppo_loss(
+#     logp_new,
+#     logp_old,
+#     advantages,
+#     epsilon,
+#     v_theta,
+#     clip_eps=0.2,
+# ):
+
+#     ratio = torch.exp(logp_new - logp_old)
+
+#     v_used = v_theta / (v_theta.norm(dim=-1, keepdim=True) + 1e-8)
+
+#     alignment = (epsilon * v_used).sum(dim=-1)
+#     # alignment = alignment.pow(2)
+#     alignment = alignment.detach()
+
+#     # surr1 = ratio * alignment * advantages
+#     surr1 = alignment * advantages
+#     # surr2 = torch.clamp(ratio, 1-clip_eps, 1+clip_eps) * alignment * advantages
+
+#     # policy_loss = -torch.min(surr1, surr2).mean()
+#     policy_loss = -surr1.mean()
+#     approx_kl = (logp_old - logp_new).mean().item()
+#     clip_frac = ((ratio - 1.0).abs() > clip_eps).float().mean().item()
+
+#     alignment_mean = alignment.mean().item()
+
+#     return policy_loss, approx_kl, clip_frac, alignment_mean
 
 
-# # ========================
-# # Collect Rollout（正确 episode reward）
-# # ========================
-# def collect_rollout(envs, policy, steps=2048):
-#     obs_buf, act_buf, logp_buf, rew_buf, val_buf, done_buf = [], [], [], [], [], []
-#     episode_returns = [0.0] * envs.num_envs
-#     total_episode_rewards = []
+# # ============================================================
+# # Train
+# # ============================================================
 
-#     obs, _ = envs.reset()
-#     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+# def train(use_velocity_weighted=True, seed=42):
 
-#     for _ in range(steps):
+#     set_seed(seed)
+
+#     env = gym.make(ENV_NAME)
+#     env.reset(seed=seed)
+
+#     state_dim = env.observation_space.shape[0]
+#     action_dim = env.action_space.shape[0]
+
+#     model = ActorCritic(state_dim, action_dim).to(DEVICE)
+#     optimizer = optim.Adam(model.parameters(), lr=LR)
+
+#     # ⭐ TensorBoard writer
+#     writer = make_writer(use_velocity_weighted)
+
+#     episode_rewards = deque(maxlen=50)
+
+#     total_env_steps = 0
+#     total_episodes = 0
+#     best_avg_reward = -1e9
+
+#     state, _ = env.reset()
+#     current_episode_reward = 0.0
+
+#     for update in range(1, TOTAL_UPDATES + 1):
+
+#         buffer = {
+#             "states": [],
+#             "actions": [],
+#             "logps": [],
+#             "rewards": [],
+#             "dones": [],
+#             "values": [],
+#             "eps": [],
+#         }
+
+#         # ================= rollout =================
+
+#         for step in range(ROLLOUT_STEPS):
+
+#             s = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+
+#             with torch.no_grad():
+#                 action, logp, entropy, value, mean, dist = model.sample_action(s)
+
+#             a = action.squeeze(0).cpu().numpy()
+
+#             next_state, reward, terminated, truncated, _ = env.step(a)
+#             done = terminated or truncated
+
+#             epsilon = ((action - mean) / (dist.scale + 1e-8)).squeeze(0)
+
+#             buffer["states"].append(state)
+#             buffer["actions"].append(action.squeeze(0).cpu())
+#             buffer["logps"].append(logp.squeeze(0).cpu())
+#             buffer["rewards"].append(reward)
+#             buffer["dones"].append(float(done))
+#             buffer["values"].append(value.item())
+#             buffer["eps"].append(epsilon.cpu())
+
+#             state = next_state
+#             current_episode_reward += reward
+#             total_env_steps += 1
+
+#             if done:
+#                 episode_rewards.append(current_episode_reward)
+#                 total_episodes += 1
+#                 current_episode_reward = 0.0
+#                 state, _ = env.reset()
+
+#         # ================= bootstrap =================
+
 #         with torch.no_grad():
-#             act, logp, val, _ = policy.get_action_and_value(obs)
+#             s = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+#             _, _, next_value = model.forward(s)
+#             next_value = next_value.item()
 
-#         next_obs, reward, terminated, truncated, _ = envs.step(act.cpu().numpy())
-#         done = np.logical_or(terminated, truncated)
+#         # ================= GAE =================
 
-#         # 累加 episode reward
-#         for i in range(envs.num_envs):
-#             episode_returns[i] += float(reward[i])
-#             if done[i]:
-#                 total_episode_rewards.append(episode_returns[i])
-#                 episode_returns[i] = 0.0
-                
-
-#         obs_buf.append(obs)
-#         act_buf.append(act)
-#         logp_buf.append(logp)
-#         rew_buf.append(torch.as_tensor(reward, dtype=torch.float32, device=device))
-#         val_buf.append(val)
-#         done_buf.append(torch.as_tensor(done, dtype=torch.float32, device=device))
-
-#         obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
-
-#     # 最后一个 value
-#     with torch.no_grad():
-#         _, last_val = policy.forward(obs)
-#         last_val = last_val.squeeze(-1).detach()
-
-#     values = torch.stack(val_buf)
-#     rewards = torch.stack(rew_buf)
-#     dones = torch.stack(done_buf)
-
-#     advantages, returns = compute_gae(rewards, values, dones, last_val)
-
-#     # 展平并归一化
-#     advantages = advantages.reshape(-1)
-#     returns = returns.reshape(-1)
-#     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-#     obs_tensor = torch.cat(obs_buf)
-#     act_tensor = torch.cat(act_buf)
-#     old_logp_tensor = torch.cat(logp_buf)
-
-#     avg_reward = np.mean(total_episode_rewards) if total_episode_rewards else 0.0
-
-#     return obs_tensor, act_tensor, old_logp_tensor, advantages, returns, avg_reward
-
-
-# # ========================
-# # Train Step
-# # ========================
-# def train_step(policy, optimizer, obs, act, old_logp, adv, returns, use_noise=False, base_scale=5e-3):
-#     optimizer.zero_grad()
-
-#     logits, values = policy(obs)
-#     dist = Categorical(logits=logits)
-#     new_logp = dist.log_prob(act)
-#     entropy = dist.entropy()
-#     policy_loss = ppo_loss(new_logp, old_logp, adv, entropy, ent_coef=0.01)
-#     value_loss = 0.5 * nn.functional.mse_loss(values.squeeze(-1), returns)
-#     kl = approx_kl(new_logp, old_logp)
-
-#     loss = policy_loss + 0.5 * value_loss + 0.01 * kl
-
-#     if use_noise:
-#         noisy_grads, noise_scale = apply_orthogonal_gradient_noise(
-#             policy, loss, base_scale=base_scale
+#         advantages, returns = compute_gae(
+#             buffer["rewards"],
+#             buffer["values"],
+#             buffer["dones"],
+#             next_value,
+#             GAMMA,
+#             GAE_LAMBDA,
 #         )
-#         assign_grads(policy,noisy_grads)
-#         # update_params(policy,noisy_params)
-#     else:
-#         loss.backward()
-#         noise_scale = 0.0
 
-#     torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
-#     optimizer.step()
+#         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-#     return policy_loss.item(), kl.item(), value_loss.item(), noise_scale, entropy.cpu().detach()
+#         # ================= tensor =================
 
+#         states = torch.FloatTensor(np.array(buffer["states"])).to(DEVICE)
+#         actions = torch.stack(buffer["actions"]).to(DEVICE)
+#         old_logps = torch.stack(buffer["logps"]).to(DEVICE)
+#         eps = torch.stack(buffer["eps"]).to(DEVICE)
 
-# # ========================
-# # Main Training Loop
-# # ========================
-# def run(use_noise=False, base_scale=5e-3, epochs=60,run_time=None):
-#     num_envs = 20
-#     log_root = "runs" 
-#     if use_noise:
-#         run_name = run_time+"_Noise"
-#     else:
-#         run_name = run_time+"_Baseline"
-#     log_dir = os.path.join(log_root, run_name)
-#     writer = SummaryWriter(log_dir=log_dir)
-    
-#     envs = gym.vector.SyncVectorEnv([lambda: gym.make("MountainCar-v0") for _ in range(num_envs)])
-#     obs_dim = envs.single_observation_space.shape[0]
-#     act_dim = envs.single_action_space.n
-    
-#     policy = ActorCritic(obs_dim=obs_dim, act_dim=act_dim).to(device)
-#     optimizer = optim.Adam(policy.parameters(), lr=3e-4)
+#         advantages = advantages.to(DEVICE)
+#         returns = returns.to(DEVICE)
 
-#     best_reward = 0.0
-#     for epoch in range(epochs):
-#         obs, act, old_logp, adv, returns, avg_reward = collect_rollout(envs, policy)
+#         # ================= update =================
 
-#         losses, kls, vlosses, noise_scales,entropys = [], [], [], [], []
-#         for _ in range(4):
-#             p_loss, kl, v_loss, n_scale,entropy = train_step(
-#                 policy, optimizer, obs, act, old_logp, adv, returns,
-#                 use_noise=use_noise, base_scale=base_scale
-#             )
-#             losses.append(p_loss)
-#             kls.append(kl)
-#             vlosses.append(v_loss)
-#             noise_scales.append(n_scale)
-#             entropys.append(entropy)
-#         mean_noise = np.mean([s for s in noise_scales if s > 0]) if use_noise else 0.0
+#         policy_loss_val = 0
+#         value_loss_val = 0
+#         entropy_val = 0
+#         alignment_val = 0
+#         kl_val = 0
+#         clip_val = 0
 
-#         if avg_reward > best_reward:
-#             best_reward = avg_reward
-#         writer.add_scalar("Reward/avg", avg_reward, epoch)
-#         writer.add_scalar("Loss/policy", np.mean(losses), epoch)
-#         writer.add_scalar("Loss/value", np.mean(vlosses), epoch)
-#         writer.add_scalar("KL", np.mean(kls), epoch)
-#         writer.add_scalar("Entropy", np.mean(entropys),epoch)
-#         if use_noise:
-#             writer.add_scalar("Noise/scale", mean_noise, epoch)
-#         print(f"[{'NOISE' if use_noise else 'BASELINE'}] "
-#               f"Epoch {epoch:3d} | "
-#               f"Policy Loss {np.mean(losses):.4f} | "
-#               f"KL {np.mean(kls):.4f} | "
-#               f"Value Loss {np.mean(vlosses):.4f} | "
-#               f"Avg Episode Reward {avg_reward:.1f} (best {best_reward:.1f}) | "
-#               f"Entropy {np.mean(entropys):.4f} |"
-#               f"Noise Scale {mean_noise:.6f}")
+#         for epoch in range(UPDATE_EPOCHS):
 
-#     envs.close()
+#             idx = np.random.permutation(len(states))
+
+#             for start in range(0, len(states), MINIBATCH_SIZE):
+
+#                 mb = idx[start:start+MINIBATCH_SIZE]
+
+#                 mb_s = states[mb]
+#                 mb_a = actions[mb]
+#                 mb_lp = old_logps[mb]
+#                 mb_adv = advantages[mb]
+#                 mb_ret = returns[mb]
+#                 mb_eps = eps[mb]
+
+#                 dist, mean, value = model.get_dist(mb_s)
+
+#                 logp = dist.log_prob(mb_a).sum(dim=-1)
+#                 entropy = dist.entropy().sum(dim=-1).mean()
+
+#                 if use_velocity_weighted:
+
+#                     policy_loss, kl, clip, align = velocity_weighted_ppo_loss(
+#                         logp, mb_lp, mb_adv, mb_eps, mean
+#                     )
+#                     alignment_val = align
+
+#                 else:
+
+#                     policy_loss, kl, clip = standard_ppo_loss(
+#                         logp, mb_lp, mb_adv
+#                     )
+#                     alignment_val = 0.0
+
+#                 value_loss = (value - mb_ret).pow(2).mean()
+
+#                 loss = policy_loss + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
+
+#                 optimizer.zero_grad()
+#                 loss.backward()
+
+#                 grad_norm = torch.nn.utils.clip_grad_norm_(
+#                     model.parameters(),
+#                     MAX_GRAD_NORM,
+#                 )
+
+#                 optimizer.step()
+
+#                 policy_loss_val = policy_loss.item()
+#                 value_loss_val = value_loss.item()
+#                 entropy_val = entropy.item()
+#                 kl_val = kl
+#                 clip_val = clip
+
+#         # ================= logging =================
+
+#         avg_reward = np.mean(episode_rewards) if len(episode_rewards) > 0 else 0.0
+
+#         best_avg_reward = max(best_avg_reward, avg_reward)
+
+#         step = update
+
+#         writer.add_scalar("reward/avg50", avg_reward, step)
+#         writer.add_scalar("reward/best", best_avg_reward, step)
+
+#         writer.add_scalar("loss/policy", policy_loss_val, step)
+#         writer.add_scalar("loss/value", value_loss_val, step)
+
+#         writer.add_scalar("stats/entropy", entropy_val, step)
+#         writer.add_scalar("stats/kl", kl_val, step)
+#         writer.add_scalar("stats/clip", clip_val, step)
+#         writer.add_scalar("stats/grad_norm", grad_norm.item(), step)
+
+#         writer.add_scalar("geometry/alignment", alignment_val, step)
+
+#         print(
+#             f"[{update}] reward={avg_reward:.1f} "
+#             f"align={alignment_val:.3f} "
+#             f"kl={kl_val:.5f}"
+#         )
+
 #     writer.close()
-#     return best_reward
+#     env.close()
+
+#     return best_avg_reward
 
 
-# # ========================
+# # ============================================================
 # # Run
-# # ========================
+# # ============================================================
+
 # if __name__ == "__main__":
-#     torch.manual_seed(42)
-#     np.random.seed(42)
-#     run_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-    
-    
-#     print("\n=== 1. Baseline PPO ===")
-#     baseline_reward = run(use_noise=False,run_time=run_time)
-    
-
-
-#     print("\n=== 2. PPO + 曲率自适应正交梯度噪声 ===")
-#     noise_reward = run(use_noise=True, base_scale=5e-4 ,run_time=run_time)
-    
 
     
-#     print("\n=== 训练结束 ===")
-#     print(f"Baseline 最终平均奖励: {baseline_reward:.1f}")
-#     print(f"带噪声版本最终平均奖励: {noise_reward:.1f}")
+
+#     print("Velocity PPO")
+#     vel = train(True)
     
+#     print("Standard PPO")
+#     std = train(False)
+
+#     print("Final:", std, vel)
 
 
 
-import gymnasium as gym
-import numpy as np
+
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.distributions import Normal
-from torch.utils.tensorboard import SummaryWriter
-import time
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# load_ckpt = torch.load("/home/wyh/RLinf/logs/20260526-21:03:57-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_150/actor/model_state_dict/full_weights.pt",map_location="cpu")
+# print(load_ckpt.keys())
+from torch.distributed.checkpoint import FileSystemReader
+from torch.distributed.checkpoint.metadata import Metadata
 
-
-# =========================
-# Actor-Critic (Gaussian)
-# =========================
-class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super().__init__()
-
-        self.shared = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.Tanh(),
-            nn.Linear(256, 256),
-            nn.Tanh()
-        )
-
-        self.actor_mean = nn.Linear(256, action_dim)
-        self.critic = nn.Linear(256, 1)
-
-        # state-independent log std（经典 PPO 写法）
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
-
-    def forward(self, x):
-        x = self.shared(x)
-        mean = self.actor_mean(x)
-        value = self.critic(x)
-        return mean, value
-
-
-# =========================
-# PPO Buffer
-# =========================
-class Buffer:
-    def __init__(self):
-        self.states = []
-        self.actions = []
-        self.logprobs = []
-        self.rewards = []
-        self.dones = []
-        self.values = []
-
-    def clear(self):
-        self.__init__()
-
-
-# =========================
-# PPO Agent
-# =========================
-class PPO:
-    def __init__(self, state_dim, action_dim):
-
-        self.gamma = 0.99
-        self.lam = 0.95
-        self.clip_eps = 0.2
-        self.k_epochs = 10
-        self.lr = 3e-4
-
-        self.policy = ActorCritic(state_dim, action_dim).to(device)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=self.lr)
-
-        self.buffer = Buffer()
-
-    # -------- tanh gaussian policy --------
-    def get_dist(self, state):
-        mean, value = self.policy(state)
-        std = self.policy.log_std.exp().expand_as(mean)
-        dist = Normal(mean, std)
-        return dist, value
-
-    def select_action(self, state,writer):
-        state = torch.FloatTensor(state).to(device)
-
-        dist, value = self.get_dist(state)
-        raw_action = dist.sample()
-
-        action = torch.tanh(raw_action)  # squash to [-1, 1]
-
-        logprob = dist.log_prob(raw_action).sum(dim=-1)
-
-        self.buffer.states.append(state)
-        self.buffer.actions.append(raw_action.detach())
-        self.buffer.logprobs.append(logprob.detach())
-        self.buffer.values.append(value.squeeze().detach())
-        # writer.add_scalar("action/norm", raw_action.norm().item(), global_step)
-        return action.cpu().numpy()
-
-    # -------- GAE --------
-    def compute_gae(self, next_value=0):
-        rewards = []
-        gae = 0
-
-        values = self.buffer.values + [torch.tensor(next_value, device=device)]
-
-        for i in reversed(range(len(self.buffer.rewards))):
-            delta = self.buffer.rewards[i] + self.gamma * values[i+1] * (1 - self.buffer.dones[i]) - values[i]
-            gae = delta + self.gamma * self.lam * (1 - self.buffer.dones[i]) * gae
-            rewards.insert(0, gae + values[i])
-
-        returns = torch.stack(rewards)
-        values = torch.stack(self.buffer.values)
-        advantages = returns - values
-
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        return returns.detach(), advantages.detach()
-
-    # -------- PPO update --------
-    def update(self,writer,global_step):
-        states = torch.stack(self.buffer.states).to(device)
-        actions = torch.stack(self.buffer.actions).to(device)
-        old_logprobs = torch.stack(self.buffer.logprobs).to(device)
-
-        returns, advantages = self.compute_gae()
-
-        for _ in range(self.k_epochs):
-
-            mean, values = self.policy(states)
-
-            std = self.policy.log_std.exp().unsqueeze(0).expand_as(mean)
-
-            new_dist = Normal(mean, std)
-
-            new_logprobs = new_dist.log_prob(actions).sum(dim=-1)
-            entropy = new_dist.entropy().sum(dim=-1)
-
-            ratios = torch.exp(new_logprobs - old_logprobs)
-
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
-
-            actor_loss = -torch.min(surr1, surr2).mean()
-            critic_loss = nn.MSELoss()(values.squeeze(), returns)
-
-            loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy.mean()
-            writer.add_scalar("loss/actor", actor_loss.item(), global_step)
-            writer.add_scalar("loss/critic", critic_loss.item(), global_step)
-            writer.add_scalar("loss/entropy", entropy.mean().item(), global_step)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-        self.buffer.clear()
-
-
-# =========================
-# Training Loop
-# =========================
-def train():
-    env = gym.make("HalfCheetah-v4")
-    writer = SummaryWriter(log_dir=f"runs/ppo_halfcheetah_{int(time.time())}")
-    global_step = 0
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-
-    agent = PPO(state_dim, action_dim)
-
-    max_episodes = 1000
-    step_count = 0
-    batch_size = 2048
-
-    for ep in range(max_episodes):
-
-        state, _ = env.reset()
-        ep_reward = 0
-
-        while True:
-
-            action = agent.select_action(state,writer)
-
-            next_state, reward, done, truncated, _ = env.step(action)
-
-            agent.buffer.rewards.append(reward)
-            agent.buffer.dones.append(done or truncated)
-
-            state = next_state
-            ep_reward += reward
-            step_count += 1
-
-            if step_count % batch_size == 0:
-                agent.update(writer,step_count)
-
-            if done or truncated:
-                break
-
-        print(f"Episode {ep} | Reward: {ep_reward:.2f}")
-
-
-if __name__ == "__main__":
-    train()
+reader = FileSystemReader(
+    "/home/wyh/RLinf/logs/20260526-21:03:57-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_150/actor/dcp_checkpoint"
+)
+# "/home/wyh/RLinf/logs/20260527-03:10:00-maniskill_ppo_openpi_pi05_baseline/maniskill_ppo_openpi_pi05_baseline/checkpoints/global_step_250/actor/dcp_checkpoint"
+metadata = reader.read_metadata()
+for name in metadata.state_dict_metadata.keys():
+    if "optimizers.param_groups.0.lr" in name:
+        print(metadata.state_dict_metadata[name])
